@@ -63,6 +63,10 @@ func parseCommand(_ raw: String) throws -> ControlCommand {
         return .warmup
     case "start":
         return .start
+    case "start-robust":
+        return .startRobust
+    case "retry-robust":
+        return .retryRobust
     case "stop":
         return .stop
     case "cancel":

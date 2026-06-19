@@ -38,6 +38,7 @@ Behavior:
 - prewarms `whisper-server` on launch
 - uses HTTP for fast resident inference
 - falls back to `whisper-cli` if the server path fails
+- retains the most recent capture in memory so it can be retranscribed with the robust model
 - keeps completed results in memory until Hammerspoon pulls them
 
 ### Control CLI
@@ -48,6 +49,7 @@ Commands:
 
 - `warmup`
 - `start`
+- `retry-robust`
 - `stop`
 - `cancel`
 - `next-result`
@@ -87,18 +89,20 @@ That removes:
 
 - builds the binaries
 - writes the config file
-- installs the LaunchAgent
+- installs the dictation LaunchAgent
+- installs the Hammerspoon startup LaunchAgent
 - installs the Hammerspoon dictation module with a guarded loader
 - warms the daemon
 
 ### Login Time
 
-`launchd` starts the daemon automatically.
+`launchd` starts the daemon and Hammerspoon automatically.
 
 ### Dictation Time
 
 - start: open a logical session and keep buffering
 - stop: flush buffered audio, enqueue transcription, paste when complete
+- retry-robust: enqueue the most recent capture again using the robust model
 - cancel: discard the active session without transcription
 
 Successful dictations are not retained by default. Failed or low-confidence sessions can write salvage artifacts for debugging, and successful recent capture retention is opt-in through config.

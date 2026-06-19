@@ -22,6 +22,15 @@ private enum ServerState: String {
     case ready
 }
 
+private struct TranscriptionServerConfig {
+    let profile: TranscriptionProfile
+    let modelPath: String
+    let serverPort: Int
+    let requestTimeoutSeconds: Double
+    let warmOnLaunch: Bool
+    let logURL: URL
+}
+
 private enum TranscriptOutcome {
     case text(String, TranscriptDiagnostic?)
     case noSpeech
@@ -39,6 +48,8 @@ private enum TranscriptionError: LocalizedError {
     case serverTimedOut(Double)
     case cliFailed(String)
     case cliTimedOut(Double)
+    case robustModelNotConfigured
+    case noRetryableCapture
     case lowConfidence(String)
     case captureIncomplete(String)
     case combined(server: Error, cli: Error)
@@ -55,6 +66,10 @@ private enum TranscriptionError: LocalizedError {
             return details
         case .cliTimedOut(let seconds):
             return "whisper-cli timed out after \(Int(seconds)) seconds"
+        case .robustModelNotConfigured:
+            return "Robust dictation model is not configured. Reinstall with WHISPER_ROBUST_MODEL_PATH."
+        case .noRetryableCapture:
+            return "No previous recording is available to retranscribe."
         case .lowConfidence(let details):
             return details
         case .captureIncomplete(let details):
@@ -84,8 +99,12 @@ final class TranscriptionManager: @unchecked Sendable {
 
     private var pending = [PendingTranscription]()
     private var processing = false
-    private var serverProcess: Process?
-    private var serverState: ServerState = .stopped
+    private var lastRetryableCapture: PendingTranscription?
+    private var serverProcesses = [TranscriptionProfile: Process]()
+    private var serverStates: [TranscriptionProfile: ServerState] = [
+        .fast: .stopped,
+        .robust: .stopped,
+    ]
 
     init(config: AppConfig, paths: AppPaths, onCompleted: @escaping @Sendable (SessionResultPayload) -> Void) {
         self.config = config
@@ -94,13 +113,17 @@ final class TranscriptionManager: @unchecked Sendable {
     }
 
     func prewarmServerIfNeeded() {
-        guard config.warmServerOnLaunch else {
-            return
-        }
-
         queue.async { [weak self] in
             guard let self else { return }
-            _ = try? self.ensureServerReady(timeout: 15.0)
+            for profile in [TranscriptionProfile.fast, .robust] {
+                guard let profileConfig = try? self.serverConfig(for: profile), profileConfig.warmOnLaunch else {
+                    continue
+                }
+                _ = try? self.ensureServerReady(
+                    for: profile,
+                    timeout: self.startupTimeoutSeconds(for: profileConfig)
+                )
+            }
         }
     }
 
@@ -116,8 +139,40 @@ final class TranscriptionManager: @unchecked Sendable {
                 enqueuedAt: Date()
             )
 
+            self.lastRetryableCapture = pending
             self.pending.append(pending)
             self.processNextIfNeeded()
+        }
+    }
+
+    func enqueueRobustRetry() throws -> String {
+        try queue.sync {
+            _ = try self.serverConfig(for: .robust)
+            guard let lastRetryableCapture else {
+                throw TranscriptionError.noRetryableCapture
+            }
+
+            let retrySessionId = UUID().uuidString.lowercased()
+            let retryCapture = StoppedCapture(
+                sessionId: retrySessionId,
+                transcriptionProfile: .robust,
+                startedAt: lastRetryableCapture.capture.startedAt,
+                stoppedAt: lastRetryableCapture.capture.stoppedAt,
+                prebufferMilliseconds: lastRetryableCapture.capture.prebufferMilliseconds,
+                samples: lastRetryableCapture.capture.samples,
+                signalMetrics: lastRetryableCapture.capture.signalMetrics
+            )
+            let retry = PendingTranscription(
+                capture: retryCapture,
+                wavData: lastRetryableCapture.wavData,
+                wavURL: paths.tempDirectoryURL.appendingPathComponent("\(retrySessionId).wav"),
+                enqueuedAt: Date()
+            )
+
+            self.lastRetryableCapture = retry
+            self.pending.append(retry)
+            self.processNextIfNeeded()
+            return retrySessionId
         }
     }
 
@@ -127,17 +182,19 @@ final class TranscriptionManager: @unchecked Sendable {
         }
     }
 
-    func currentServerState() -> String {
+    func currentServerState(for profile: TranscriptionProfile) -> String {
         queue.sync {
-            serverState.rawValue
+            serverState(for: profile).rawValue
         }
     }
 
     func stop() {
         queue.sync {
-            terminateServerProcess()
-            self.serverProcess = nil
-            self.serverState = .stopped
+            for profile in [TranscriptionProfile.fast, .robust] {
+                terminateServerProcess(for: profile)
+                self.serverProcesses.removeValue(forKey: profile)
+                self.serverStates[profile] = .stopped
+            }
         }
     }
 
@@ -177,7 +234,7 @@ final class TranscriptionManager: @unchecked Sendable {
         if pending.capture.signalMetrics.probablySilent {
             return noSpeechResult(
                 for: pending.capture,
-                transcriptionMode: "silent-capture",
+                transcriptionMode: transcriptionMode("silent-capture", for: pending.capture.transcriptionProfile),
                 start: start,
                 queueWaitMs: queueWaitMs
             )
@@ -204,7 +261,7 @@ final class TranscriptionManager: @unchecked Sendable {
                     text: text,
                     diagnostic: diagnostic,
                     assessment: assessment,
-                    transcriptionMode: "server",
+                    transcriptionMode: transcriptionMode("server", for: pending.capture.transcriptionProfile),
                     start: start,
                     queueWaitMs: queueWaitMs
                 )
@@ -212,7 +269,7 @@ final class TranscriptionManager: @unchecked Sendable {
                 guard shouldAttemptCLIFallback(for: pending.capture, diskStatus: diskStatus) else {
                     return noSpeechResult(
                         for: pending.capture,
-                        transcriptionMode: "no-speech",
+                        transcriptionMode: transcriptionMode("no-speech", for: pending.capture.transcriptionProfile),
                         start: start,
                         queueWaitMs: queueWaitMs
                     )
@@ -240,14 +297,14 @@ final class TranscriptionManager: @unchecked Sendable {
                             text: text,
                             diagnostic: diagnostic,
                             assessment: assessment,
-                            transcriptionMode: "cli",
+                            transcriptionMode: transcriptionMode("cli", for: pending.capture.transcriptionProfile),
                             start: start,
                             queueWaitMs: queueWaitMs
                         )
                     case .noSpeech:
                         return noSpeechResult(
                             for: pending.capture,
-                            transcriptionMode: "no-speech",
+                            transcriptionMode: transcriptionMode("no-speech", for: pending.capture.transcriptionProfile),
                             start: start,
                             queueWaitMs: queueWaitMs
                         )
@@ -259,7 +316,7 @@ final class TranscriptionManager: @unchecked Sendable {
                     )
                     return noSpeechResult(
                         for: pending.capture,
-                        transcriptionMode: "no-speech",
+                        transcriptionMode: transcriptionMode("no-speech", for: pending.capture.transcriptionProfile),
                         start: start,
                         queueWaitMs: queueWaitMs
                     )
@@ -288,14 +345,14 @@ final class TranscriptionManager: @unchecked Sendable {
                         text: text,
                         diagnostic: diagnostic,
                         assessment: assessment,
-                        transcriptionMode: "cli",
+                        transcriptionMode: transcriptionMode("cli", for: pending.capture.transcriptionProfile),
                         start: start,
                         queueWaitMs: queueWaitMs
                     )
                 case .noSpeech:
                     return noSpeechResult(
                         for: pending.capture,
-                        transcriptionMode: "no-speech",
+                        transcriptionMode: transcriptionMode("no-speech", for: pending.capture.transcriptionProfile),
                         start: start,
                         queueWaitMs: queueWaitMs
                     )
@@ -375,7 +432,7 @@ final class TranscriptionManager: @unchecked Sendable {
                     text: cliText,
                     diagnostic: cliDiagnostic ?? serverDiagnostic,
                     assessment: cliAssessment,
-                    transcriptionMode: "cli-second-pass",
+                    transcriptionMode: transcriptionMode("cli-second-pass", for: pending.capture.transcriptionProfile),
                     start: start,
                     queueWaitMs: queueWaitMs
                 )
@@ -484,6 +541,10 @@ final class TranscriptionManager: @unchecked Sendable {
         Double(capture.samples.count) / 16.0
     }
 
+    private func transcriptionMode(_ mode: String, for profile: TranscriptionProfile) -> String {
+        profile == .fast ? mode : "\(profile.rawValue)-\(mode)"
+    }
+
     private func completedResult(
         for capture: StoppedCapture,
         text: String,
@@ -495,6 +556,7 @@ final class TranscriptionManager: @unchecked Sendable {
         let integrity = captureIntegrityAssessment(for: capture)
         let metrics = SessionMetrics(
             sessionId: capture.sessionId,
+            transcriptionProfile: capture.transcriptionProfile.rawValue,
             prebufferMilliseconds: capture.prebufferMilliseconds,
             audioDurationMilliseconds: integrity.capturedAudioMilliseconds,
             captureStartedAtISO8601: ISO8601DateFormatter().string(from: capture.startedAt),
@@ -527,6 +589,7 @@ final class TranscriptionManager: @unchecked Sendable {
         let integrity = captureIntegrityAssessment(for: capture)
         let metrics = SessionMetrics(
             sessionId: capture.sessionId,
+            transcriptionProfile: capture.transcriptionProfile.rawValue,
             prebufferMilliseconds: capture.prebufferMilliseconds,
             audioDurationMilliseconds: integrity.capturedAudioMilliseconds,
             captureStartedAtISO8601: ISO8601DateFormatter().string(from: capture.startedAt),
@@ -559,6 +622,7 @@ final class TranscriptionManager: @unchecked Sendable {
         let integrity = captureIntegrityAssessment(for: pending.capture)
         let metrics = SessionMetrics(
             sessionId: pending.capture.sessionId,
+            transcriptionProfile: pending.capture.transcriptionProfile.rawValue,
             prebufferMilliseconds: pending.capture.prebufferMilliseconds,
             audioDurationMilliseconds: integrity.capturedAudioMilliseconds,
             captureStartedAtISO8601: ISO8601DateFormatter().string(from: pending.capture.startedAt),
@@ -567,7 +631,7 @@ final class TranscriptionManager: @unchecked Sendable {
             activeAudioMilliseconds: integrity.activeAudioMilliseconds,
             captureDroppedMilliseconds: integrity.droppedMilliseconds,
             captureCoverageRatio: integrity.coverageRatio,
-            transcriptionMode: "failed",
+            transcriptionMode: transcriptionMode("failed", for: pending.capture.transcriptionProfile),
             transcriptionMilliseconds: nil,
             queueWaitMilliseconds: nil,
             completedAtISO8601: ISO8601DateFormatter().string(from: Date())
@@ -589,22 +653,61 @@ final class TranscriptionManager: @unchecked Sendable {
         )
     }
 
-    private func ensureServerReady(timeout: TimeInterval) throws {
-        if let serverProcess, serverProcess.isRunning, isServerHealthySync() {
-            serverState = .ready
+    private func serverConfig(for profile: TranscriptionProfile) throws -> TranscriptionServerConfig {
+        switch profile {
+        case .fast:
+            return TranscriptionServerConfig(
+                profile: .fast,
+                modelPath: config.whisperModelPath,
+                serverPort: config.whisperServerPort,
+                requestTimeoutSeconds: config.serverRequestTimeoutSeconds,
+                warmOnLaunch: config.warmServerOnLaunch,
+                logURL: paths.whisperServerLogURL
+            )
+        case .robust:
+            guard let robustModelPath = config.whisperRobustModelPath?.trimmingCharacters(
+                in: .whitespacesAndNewlines
+            ), !robustModelPath.isEmpty else {
+                throw TranscriptionError.robustModelNotConfigured
+            }
+            return TranscriptionServerConfig(
+                profile: .robust,
+                modelPath: robustModelPath,
+                serverPort: config.robustWhisperServerPort,
+                requestTimeoutSeconds: config.robustServerRequestTimeoutSeconds,
+                warmOnLaunch: config.warmRobustServerOnLaunch,
+                logURL: paths.robustWhisperServerLogURL
+            )
+        }
+    }
+
+    private func serverState(for profile: TranscriptionProfile) -> ServerState {
+        serverStates[profile] ?? .stopped
+    }
+
+    private func setServerState(_ state: ServerState, for profile: TranscriptionProfile) {
+        serverStates[profile] = state
+    }
+
+    private func ensureServerReady(for profile: TranscriptionProfile, timeout: TimeInterval) throws {
+        let profileConfig = try serverConfig(for: profile)
+        if let serverProcess = serverProcesses[profile],
+           serverProcess.isRunning,
+           isServerHealthySync(profileConfig) {
+            setServerState(.ready, for: profile)
             return
         }
 
-        try cleanupConflictingServerProcesses()
+        try cleanupConflictingServerProcesses(profileConfig)
 
-        if serverProcess == nil || serverProcess?.isRunning == false {
-            try launchServer()
+        if serverProcesses[profile] == nil || serverProcesses[profile]?.isRunning == false {
+            try launchServer(profileConfig)
         }
 
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if isServerHealthySync() {
-                serverState = .ready
+            if isServerHealthySync(profileConfig) {
+                setServerState(.ready, for: profile)
                 return
             }
             Thread.sleep(forTimeInterval: 0.1)
@@ -613,46 +716,50 @@ final class TranscriptionManager: @unchecked Sendable {
         throw NSError(
             domain: "WhisperDictation",
             code: 2,
-            userInfo: [NSLocalizedDescriptionKey: "whisper-server did not become ready"]
+            userInfo: [NSLocalizedDescriptionKey: "\(profile.rawValue) whisper-server did not become ready"]
         )
     }
 
-    private func launchServer() throws {
-        serverState = .starting
+    private func launchServer(_ profileConfig: TranscriptionServerConfig) throws {
+        setServerState(.starting, for: profileConfig.profile)
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.whisperServerBinary)
         process.arguments = [
-            "-m", config.whisperModelPath,
+            "-m", profileConfig.modelPath,
             "--host", config.whisperServerHost,
-            "--port", String(config.whisperServerPort),
+            "--port", String(profileConfig.serverPort),
             "-t", String(config.whisperThreads),
         ]
         if let vadModelPath = resolvedVADModelPath() {
             process.arguments?.append(contentsOf: ["-vm", vadModelPath])
         }
 
-        let logHandle = try ensureWritableLog(at: paths.whisperServerLogURL)
+        let logHandle = try ensureWritableLog(at: profileConfig.logURL)
         process.standardOutput = logHandle
         process.standardError = logHandle
 
         try process.run()
-        serverProcess = process
+        serverProcesses[profileConfig.profile] = process
     }
 
-    private func restartServer() throws {
-        terminateServerProcess()
-        self.serverProcess = nil
-        serverState = .stopped
-        try cleanupConflictingServerProcesses()
-        try ensureServerReady(timeout: 15.0)
+    private func restartServer(for profile: TranscriptionProfile) throws {
+        terminateServerProcess(for: profile)
+        self.serverProcesses.removeValue(forKey: profile)
+        setServerState(.stopped, for: profile)
+        let profileConfig = try serverConfig(for: profile)
+        try cleanupConflictingServerProcesses(profileConfig)
+        try ensureServerReady(for: profile, timeout: startupTimeoutSeconds(for: profileConfig))
     }
 
     private func transcribeViaServerWithRecovery(_ pending: PendingTranscription) throws -> TranscriptOutcome {
         let useVAD = shouldUseVAD(for: pending.capture)
+        let profile = pending.capture.transcriptionProfile
+        let profileConfig = try serverConfig(for: profile)
         do {
-            try ensureServerReady(timeout: 15.0)
+            try ensureServerReady(for: profile, timeout: startupTimeoutSeconds(for: profileConfig))
             return try transcribeViaServer(
+                profileConfig: profileConfig,
                 wavData: pending.wavData,
                 filename: pending.wavURL.lastPathComponent,
                 useVAD: useVAD
@@ -662,8 +769,10 @@ final class TranscriptionManager: @unchecked Sendable {
                 "whisper-dictation-daemon: server transcription failed; restarting server once (\(error.localizedDescription))\n",
                 stderr
             )
-            try restartServer()
+            try restartServer(for: profile)
+            let profileConfig = try serverConfig(for: profile)
             return try transcribeViaServer(
+                profileConfig: profileConfig,
                 wavData: pending.wavData,
                 filename: pending.wavURL.lastPathComponent,
                 useVAD: useVAD
@@ -671,13 +780,18 @@ final class TranscriptionManager: @unchecked Sendable {
         }
     }
 
-    private func transcribeViaServer(wavData: Data, filename: String, useVAD: Bool) throws -> TranscriptOutcome {
+    private func transcribeViaServer(
+        profileConfig: TranscriptionServerConfig,
+        wavData: Data,
+        filename: String,
+        useVAD: Bool
+    ) throws -> TranscriptOutcome {
         let boundary = "Boundary-\(UUID().uuidString)"
         var request = URLRequest(
-            url: URL(string: "http://\(config.whisperServerHost):\(config.whisperServerPort)/inference")!
+            url: URL(string: "http://\(config.whisperServerHost):\(profileConfig.serverPort)/inference")!
         )
         request.httpMethod = "POST"
-        request.timeoutInterval = config.serverRequestTimeoutSeconds
+        request.timeoutInterval = profileConfig.requestTimeoutSeconds
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         var body = Data()
@@ -725,11 +839,11 @@ final class TranscriptionManager: @unchecked Sendable {
         task.resume()
 
         let waitResult = semaphore.wait(
-            timeout: .now() + .milliseconds(Int((config.serverRequestTimeoutSeconds + 1.0) * 1000.0))
+            timeout: .now() + .milliseconds(Int((profileConfig.requestTimeoutSeconds + 1.0) * 1000.0))
         )
         if waitResult == .timedOut {
             task.cancel()
-            throw TranscriptionError.serverTimedOut(config.serverRequestTimeoutSeconds)
+            throw TranscriptionError.serverTimedOut(profileConfig.requestTimeoutSeconds)
         }
 
         if let responseError = responseBox.error {
@@ -749,6 +863,8 @@ final class TranscriptionManager: @unchecked Sendable {
     }
 
     private func transcribeViaCLI(_ pending: PendingTranscription) throws -> TranscriptOutcome {
+        let profileConfig = try serverConfig(for: pending.capture.transcriptionProfile)
+        let cliTimeoutSeconds = cliTimeoutSeconds(for: profileConfig)
         let wavURL = try materializeWAV(for: pending)
         defer {
             try? FileManager.default.removeItem(at: wavURL)
@@ -757,7 +873,7 @@ final class TranscriptionManager: @unchecked Sendable {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: config.whisperCliBinary)
         process.arguments = [
-            "-m", config.whisperModelPath,
+            "-m", profileConfig.modelPath,
             "-f", wavURL.path,
             "-nt",
             "-np",
@@ -778,14 +894,14 @@ final class TranscriptionManager: @unchecked Sendable {
         process.standardError = stderrPipe
 
         try process.run()
-        let deadline = Date().addingTimeInterval(config.cliTimeoutSeconds)
+        let deadline = Date().addingTimeInterval(cliTimeoutSeconds)
         while process.isRunning && Date() < deadline {
             Thread.sleep(forTimeInterval: 0.1)
         }
 
         if process.isRunning {
             terminateProcess(process, timeoutSeconds: 1.0)
-            throw TranscriptionError.cliTimedOut(config.cliTimeoutSeconds)
+            throw TranscriptionError.cliTimedOut(cliTimeoutSeconds)
         }
 
         let stdout = String(
@@ -809,25 +925,36 @@ final class TranscriptionManager: @unchecked Sendable {
         return normalizeTranscript(stdout)
     }
 
-    private func cleanupConflictingServerProcesses() throws {
-        let processes = listeningProcesses(on: config.whisperServerPort)
+    private func startupTimeoutSeconds(for profileConfig: TranscriptionServerConfig) -> TimeInterval {
+        profileConfig.profile == .robust ? profileConfig.requestTimeoutSeconds : 15.0
+    }
+
+    private func cliTimeoutSeconds(for profileConfig: TranscriptionServerConfig) -> TimeInterval {
+        profileConfig.profile == .robust
+            ? max(config.cliTimeoutSeconds, profileConfig.requestTimeoutSeconds)
+            : config.cliTimeoutSeconds
+    }
+
+    private func cleanupConflictingServerProcesses(_ profileConfig: TranscriptionServerConfig) throws {
+        let processes = listeningProcesses(on: profileConfig.serverPort)
         guard !processes.isEmpty else {
             return
         }
 
-        let currentPID = serverProcess?.isRunning == true ? serverProcess?.processIdentifier : nil
+        let currentProcess = serverProcesses[profileConfig.profile]
+        let currentPID = currentProcess?.isRunning == true ? currentProcess?.processIdentifier : nil
         for process in processes {
             if let currentPID, process.pid == currentPID {
                 continue
             }
 
-            guard isExpectedServerCommand(process.command) else {
+            guard isExpectedServerCommand(process.command, profileConfig: profileConfig) else {
                 throw NSError(
                     domain: "WhisperDictation",
                     code: 4,
                     userInfo: [
                         NSLocalizedDescriptionKey:
-                            "Port \(config.whisperServerPort) is already used by another process: \(process.command)"
+                            "Port \(profileConfig.serverPort) is already used by another process: \(process.command)"
                     ]
                 )
             }
@@ -869,19 +996,22 @@ final class TranscriptionManager: @unchecked Sendable {
             }
     }
 
-    private func isExpectedServerCommand(_ command: String) -> Bool {
+    private func isExpectedServerCommand(
+        _ command: String,
+        profileConfig: TranscriptionServerConfig
+    ) -> Bool {
         let serverName = URL(fileURLWithPath: config.whisperServerBinary).lastPathComponent
-        let modelName = URL(fileURLWithPath: config.whisperModelPath).lastPathComponent
+        let modelName = URL(fileURLWithPath: profileConfig.modelPath).lastPathComponent
         let matchesBinary = command.contains(config.whisperServerBinary) || command.contains("/\(serverName)")
-        let matchesModel = command.contains(config.whisperModelPath) || command.contains("/\(modelName)")
+        let matchesModel = command.contains(profileConfig.modelPath) || command.contains("/\(modelName)")
 
         return matchesBinary
             && matchesModel
-            && command.contains("--port \(config.whisperServerPort)")
+            && command.contains("--port \(profileConfig.serverPort)")
     }
 
-    private func terminateServerProcess() {
-        guard let serverProcess, serverProcess.isRunning else {
+    private func terminateServerProcess(for profile: TranscriptionProfile) {
+        guard let serverProcess = serverProcesses[profile], serverProcess.isRunning else {
             return
         }
         terminateProcess(serverProcess, timeoutSeconds: 2.0)
@@ -943,8 +1073,8 @@ final class TranscriptionManager: @unchecked Sendable {
         return pending.wavURL
     }
 
-    private func isServerHealthySync() -> Bool {
-        guard let url = URL(string: "http://\(config.whisperServerHost):\(config.whisperServerPort)/") else {
+    private func isServerHealthySync(_ profileConfig: TranscriptionServerConfig) -> Bool {
+        guard let url = URL(string: "http://\(config.whisperServerHost):\(profileConfig.serverPort)/") else {
             return false
         }
 

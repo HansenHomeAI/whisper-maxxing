@@ -216,13 +216,75 @@ private func testAppConfigDefaultsPublicBetaFieldsForLegacyConfig() {
     let config = try! JSONDecoder().decode(AppConfig.self, from: legacyConfigJSON())
 
     expect(!config.persistRecentCaptures, "recent capture persistence should default off for legacy configs")
+    expect(config.whisperRobustModelPath == nil, "robust model path should default nil for legacy configs")
+    expect(
+        config.robustWhisperServerPort == AppConfig.defaultRobustWhisperServerPort,
+        "robust server port should default for legacy configs"
+    )
+    expect(
+        !config.warmRobustServerOnLaunch,
+        "robust server warmup should default off for legacy configs"
+    )
     expect(
         config.serverRequestTimeoutSeconds == AppConfig.defaultServerRequestTimeoutSeconds,
         "server timeout should default for legacy configs"
     )
     expect(
+        config.robustServerRequestTimeoutSeconds == AppConfig.defaultRobustServerRequestTimeoutSeconds,
+        "robust server timeout should default for legacy configs"
+    )
+    expect(
         config.cliTimeoutSeconds == AppConfig.defaultCLITimeoutSeconds,
         "CLI timeout should default for legacy configs"
+    )
+}
+
+private func testAppConfigDecodesRobustFields() {
+    let json = """
+    {
+      "controlHost": "127.0.0.1",
+      "controlPort": 44123,
+      "preferredInputDevice": null,
+      "enforcePreferredInputDevice": false,
+      "prebufferMilliseconds": 1000,
+      "audioBufferSizeFrames": 128,
+      "pollIntervalMilliseconds": 150,
+      "whisperServerBinary": "/tmp/whisper-server",
+      "whisperCliBinary": "/tmp/whisper-cli",
+      "whisperModelPath": "/tmp/small.bin",
+      "whisperVADModelPath": null,
+      "whisperServerHost": "127.0.0.1",
+      "whisperServerPort": 8177,
+      "whisperRobustModelPath": "/tmp/large-v3.bin",
+      "robustWhisperServerPort": 8178,
+      "tempDirectory": "/tmp/WhisperDictation",
+      "salvageDirectory": "/tmp/WhisperSalvage",
+      "daemonLogPath": "/tmp/daemon.log",
+      "whisperServerLogPath": "/tmp/whisper-server.log",
+      "controlBinaryPath": "/tmp/whisper-dictation-ctl",
+      "daemonBinaryPath": "/tmp/whisper-dictation-daemon",
+      "warmServerOnLaunch": true,
+      "warmRobustServerOnLaunch": false,
+      "whisperThreads": 4,
+      "persistRecentCaptures": false,
+      "serverRequestTimeoutSeconds": 30,
+      "robustServerRequestTimeoutSeconds": 120,
+      "cliTimeoutSeconds": 90
+    }
+    """.data(using: .utf8)!
+
+    let config = try! JSONDecoder().decode(AppConfig.self, from: json)
+    let paths = AppPaths(config: config)
+
+    expect(config.whisperRobustModelPath == "/tmp/large-v3.bin", "robust model path should decode")
+    expect(config.robustWhisperServerPort == 8178, "robust server port should decode")
+    expect(
+        config.robustServerRequestTimeoutSeconds == 120,
+        "robust server timeout should decode"
+    )
+    expect(
+        paths.robustWhisperServerLogURL.lastPathComponent == "whisper-server-robust.log",
+        "robust server log path should be derived from the fast server log"
     )
 }
 
@@ -233,6 +295,15 @@ private func testAppConfigRejectsNonLoopbackControlHost() {
     } catch {
         expect(true, "non-loopback control host rejected")
     }
+}
+
+private func testRetryRobustCommandRoundTrips() {
+    let request = ControlRequest(command: .retryRobust, sessionId: nil)
+    let encoded = try! JSONEncoder().encode(request)
+    let decoded = try! JSONDecoder().decode(ControlRequest.self, from: encoded)
+
+    expect(decoded.command == .retryRobust, "retry-robust control command should round-trip")
+    expect(decoded.sessionId == nil, "retry-robust should not need an explicit session id")
 }
 
 testLongAudioWithTinyTranscriptNeedsSecondPass()
@@ -250,5 +321,7 @@ testRestartPolicyRetriesInitialFailures()
 testSessionResultBufferCanReturnRequestedRecordingWithoutDiscardingEarlierResults()
 testSessionResultBufferPreservesResultsWhileRequestedRecordingIsPending()
 testAppConfigDefaultsPublicBetaFieldsForLegacyConfig()
+testAppConfigDecodesRobustFields()
 testAppConfigRejectsNonLoopbackControlHost()
+testRetryRobustCommandRoundTrips()
 print("TranscriptQualityTests passed")

@@ -16,7 +16,9 @@ Install-time options that matter most:
 - `PREFERRED_INPUT_DEVICE` and `ENFORCE_PREFERRED_INPUT_DEVICE=true`
 - `WHISPER_MODEL_PATH`
 - `WHISPER_VAD_MODEL_PATH`
+- `WHISPER_ROBUST_MODEL_PATH`
 - `SERVER_REQUEST_TIMEOUT_SECONDS`, default `30`
+- `ROBUST_SERVER_REQUEST_TIMEOUT_SECONDS`, default `120`
 - `CLI_TIMEOUT_SECONDS`, default `90`
 - `PERSIST_RECENT_CAPTURES=true`, opt-in successful audio/transcript retention
 
@@ -31,6 +33,7 @@ Install-time options that matter most:
 sleep 1
 ./bin/whisper-dictation-ctl stop
 ./bin/whisper-dictation-ctl next-result
+./bin/whisper-dictation-ctl retry-robust
 ```
 
 Expected status: `ok:true`, `engineReady:true`, `serverState:"ready"`, and a full prebuffer.
@@ -42,12 +45,15 @@ launchctl print gui/$(id -u)/com.hansenhomeai.whisper-dictation
 launchctl kickstart -k gui/$(id -u)/com.hansenhomeai.whisper-dictation
 launchctl bootout gui/$(id -u)/com.hansenhomeai.whisper-dictation
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hansenhomeai.whisper-dictation.plist
+launchctl print gui/$(id -u)/com.hansenhomeai.hammerspoon
 ```
 
 ## Logs And Artifacts
 
 - LaunchAgent stderr: `~/Library/Logs/WhisperDictation/launch-agent.stderr.log`
 - LaunchAgent stdout: `~/Library/Logs/WhisperDictation/launch-agent.stdout.log`
+- Hammerspoon startup stderr: `~/Library/Logs/WhisperDictation/hammerspoon-launch-agent.stderr.log`
+- Hammerspoon startup stdout: `~/Library/Logs/WhisperDictation/hammerspoon-launch-agent.stdout.log`
 - Whisper server log: `~/Library/Logs/WhisperDictation/whisper-server.log`
 - Failed or low-confidence salvage: `~/Documents/WhisperSalvage`
 - Optional successful recent captures: `~/Documents/WhisperSalvage/recent`

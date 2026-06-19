@@ -3,13 +3,11 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.hansenhomeai.whisper-dictation</string>
+  <string>com.hansenhomeai.hammerspoon</string>
 
   <key>ProgramArguments</key>
   <array>
-    <string>__DAEMON_BINARY__</string>
-    <string>--config</string>
-    <string>__CONFIG_PATH__</string>
+    <string>__HAMMERSPOON_BINARY__</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -17,9 +15,6 @@
 
   <key>KeepAlive</key>
   <true/>
-
-  <key>WorkingDirectory</key>
-  <string>__WORKING_DIRECTORY__</string>
 
   <key>StandardOutPath</key>
   <string>__STDOUT_PATH__</string>

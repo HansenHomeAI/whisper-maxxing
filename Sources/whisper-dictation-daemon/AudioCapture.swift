@@ -5,6 +5,7 @@ import WhisperDictationCore
 
 struct StoppedCapture {
     let sessionId: String
+    let transcriptionProfile: TranscriptionProfile
     let startedAt: Date
     let stoppedAt: Date
     let prebufferMilliseconds: Double
@@ -43,12 +44,20 @@ enum AudioCaptureError: Error, LocalizedError {
 
 private final class ActiveCaptureSession {
     let sessionId: String
+    let transcriptionProfile: TranscriptionProfile
     let startedAt: Date
     let prebufferMilliseconds: Double
     var samples: [Int16]
 
-    init(sessionId: String, startedAt: Date, prebufferMilliseconds: Double, samples: [Int16]) {
+    init(
+        sessionId: String,
+        transcriptionProfile: TranscriptionProfile,
+        startedAt: Date,
+        prebufferMilliseconds: Double,
+        samples: [Int16]
+    ) {
         self.sessionId = sessionId
+        self.transcriptionProfile = transcriptionProfile
         self.startedAt = startedAt
         self.prebufferMilliseconds = prebufferMilliseconds
         self.samples = samples
@@ -130,7 +139,7 @@ final class AudioCaptureEngine: @unchecked Sendable {
         }
     }
 
-    func startSession() throws -> (sessionId: String, prebufferMilliseconds: Double) {
+    func startSession(profile: TranscriptionProfile) throws -> (sessionId: String, prebufferMilliseconds: Double) {
         guard readinessAssessment().ready else {
             scheduleRestart(reason: "session-start-not-ready")
             throw AudioCaptureError.captureRecovering
@@ -164,13 +173,14 @@ final class AudioCaptureEngine: @unchecked Sendable {
 
         activeSession = ActiveCaptureSession(
             sessionId: sessionId,
+            transcriptionProfile: profile,
             startedAt: Date(),
             prebufferMilliseconds: prebufferMilliseconds,
             samples: prebufferSamples
         )
 
         fputs(
-            "whisper-dictation-daemon: capture session started id=\(sessionId) prebuffer_ms=\(Int(prebufferMilliseconds))\n",
+            "whisper-dictation-daemon: capture session started id=\(sessionId) profile=\(profile.rawValue) prebuffer_ms=\(Int(prebufferMilliseconds))\n",
             stderr
         )
 
@@ -205,6 +215,7 @@ final class AudioCaptureEngine: @unchecked Sendable {
 
         capture = StoppedCapture(
             sessionId: session.sessionId,
+            transcriptionProfile: session.transcriptionProfile,
             startedAt: session.startedAt,
             stoppedAt: stoppedAt,
             prebufferMilliseconds: session.prebufferMilliseconds,
@@ -230,6 +241,12 @@ final class AudioCaptureEngine: @unchecked Sendable {
         sessionLock.lock()
         defer { sessionLock.unlock() }
         return activeSession != nil
+    }
+
+    func currentRecordingProfile() -> TranscriptionProfile? {
+        sessionLock.lock()
+        defer { sessionLock.unlock() }
+        return activeSession?.transcriptionProfile
     }
 
     func prebufferAvailableMilliseconds() -> Double {

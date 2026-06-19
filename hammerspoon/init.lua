@@ -1,6 +1,24 @@
 -- Low-latency whisper dictation hotkey via a native capture daemon.
 
-if hs.ipc and not hs.ipc.cliStatus() then
+local function directoryIsWritable(path)
+  if not hs.fs.attributes(path) then
+    return false
+  end
+
+  local probe = string.format("%s/.hammerspoon-write-test-%d", path, os.time())
+  local file = io.open(probe, "w")
+  if not file then
+    return false
+  end
+
+  file:close()
+  os.remove(probe)
+  return true
+end
+
+if hs.ipc and not hs.ipc.cliStatus()
+    and directoryIsWritable("/usr/local/bin")
+    and directoryIsWritable("/usr/local/share/man/man1") then
   hs.ipc.cliInstall()
 end
 
@@ -19,18 +37,49 @@ hs.alert.defaultStyle = {
 }
 
 local configPath = os.getenv("HOME") .. "/Library/Application Support/WhisperDictation/config.json"
+local replacementWindowSeconds = 15
+local replacementPasteDelaySeconds = 0.08
 local config = nil
 local controlBin = nil
 local activeTasks = {}
 local pendingCount = 0
 local recordState = "idle"
+local recordProfile = "fast"
 local resultPoller = nil
 local recordingOverlay = nil
 local lastHealthWarningAt = 0
 local pendingSessionIds = {}
+local replacementTargets = {}
+local lastDictationPaste = nil
+local statusWatchdog = nil
 
 local function alert(message)
   hs.alert.show(message, 0.95)
+end
+
+local function frontmostBundleID()
+  local app = hs.application.frontmostApplication()
+  if not app then
+    return nil
+  end
+
+  return app:bundleID()
+end
+
+local function isRobustProfile(profile)
+  return profile == "robust"
+end
+
+local function recordingLabel(profile)
+  return isRobustProfile(profile) and "Robust Recording" or "Recording"
+end
+
+local function transcriptReadyLabel(profile)
+  return isRobustProfile(profile) and "Large Model Transcript Ready" or "Transcript Ready"
+end
+
+local function processingLabel(profile)
+  return isRobustProfile(profile) and "Retranscribing Audio" or "Processing Audio"
 end
 
 local function loadConfig()
@@ -50,12 +99,16 @@ local function loadConfig()
   return decoded, nil
 end
 
-local function showRecordingOverlay()
-  if recordingOverlay then return end
+local function showRecordingOverlay(profile)
+  if recordingOverlay then
+    recordingOverlay:delete()
+    recordingOverlay = nil
+  end
 
   local screen = hs.screen.mainScreen()
   local frame = screen:frame()
-  local width, height = 150, 42
+  local label = recordingLabel(profile)
+  local width, height = isRobustProfile(profile) and 228 or 150, 42
   local x = frame.x + (frame.w - width) / 2
   local y = frame.y + frame.h - height - 20
   local canvas = hs.canvas.new({x = x, y = y, w = width, h = height})
@@ -76,7 +129,7 @@ local function showRecordingOverlay()
   }, {
     action = "fill",
     type = "text",
-    text = "Recording",
+    text = label,
     textFont = hs.alert.defaultStyle.textFont,
     textSize = 19,
     textColor = hs.alert.defaultStyle.textColor,
@@ -147,16 +200,73 @@ local function normalizeTranscript(text)
   return cleaned
 end
 
-local function pasteTranscript(text)
+local function rememberDictationPaste(sessionId, profile)
+  lastDictationPaste = {
+    sessionId = sessionId,
+    profile = profile or "fast",
+    pastedAt = hs.timer.secondsSinceEpoch(),
+    bundleID = frontmostBundleID(),
+  }
+end
+
+local function replacementTargetForLastPaste()
+  if not lastDictationPaste then
+    return nil
+  end
+
+  local now = hs.timer.secondsSinceEpoch()
+  if (now - lastDictationPaste.pastedAt) > replacementWindowSeconds then
+    return nil
+  end
+
+  local currentBundleID = frontmostBundleID()
+  if lastDictationPaste.bundleID and currentBundleID and lastDictationPaste.bundleID ~= currentBundleID then
+    return nil
+  end
+
+  return {
+    originalSessionId = lastDictationPaste.sessionId,
+    originalProfile = lastDictationPaste.profile,
+    pastedAt = lastDictationPaste.pastedAt,
+    bundleID = lastDictationPaste.bundleID,
+    requestedAt = now,
+  }
+end
+
+local function canReplaceLastPaste(target)
+  if not target then
+    return false
+  end
+
+  local currentBundleID = frontmostBundleID()
+  if target.bundleID and currentBundleID and target.bundleID ~= currentBundleID then
+    return false
+  end
+
+  return true
+end
+
+local function pasteTranscript(text, profile, sessionId, replacementTarget)
   text = normalizeTranscript(text)
   if not text then
     alert("No Output")
     return
   end
 
-  hs.pasteboard.setContents(text)
-  hs.eventtap.keyStroke({"cmd"}, "v", 0)
-  alert(pendingCount > 0 and string.format("Transcript Ready (%d)", pendingCount) or "Transcript Ready")
+  local function pasteNow()
+    hs.pasteboard.setContents(text)
+    hs.eventtap.keyStroke({"cmd"}, "v", 0)
+    rememberDictationPaste(sessionId, profile)
+    local label = transcriptReadyLabel(profile)
+    alert(pendingCount > 0 and string.format("%s (%d)", label, pendingCount) or label)
+  end
+
+  if canReplaceLastPaste(replacementTarget) then
+    hs.eventtap.keyStroke({"cmd"}, "z", 0)
+    hs.timer.doAfter(replacementPasteDelaySeconds, pasteNow)
+  else
+    pasteNow()
+  end
 end
 
 local function maybeWarnAboutStatus(status)
@@ -239,37 +349,29 @@ local function stopResultPolling()
   end
 end
 
-local function currentPendingSessionId()
-  return pendingSessionIds[1]
-end
-
-local function enqueuePendingSession(sessionId)
+local function enqueuePendingSession(sessionId, profile)
   if sessionId and sessionId ~= "" then
-    table.insert(pendingSessionIds, sessionId)
+    table.insert(pendingSessionIds, {sessionId = sessionId, profile = profile or "fast"})
   end
 end
 
 local function removePendingSession(sessionId)
   if not sessionId or sessionId == "" then
-    return
+    return nil
   end
 
-  for index, pendingSessionId in ipairs(pendingSessionIds) do
-    if pendingSessionId == sessionId then
+  for index, pending in ipairs(pendingSessionIds) do
+    if pending.sessionId == sessionId then
       table.remove(pendingSessionIds, index)
-      return
+      return pending.profile
     end
   end
+
+  return nil
 end
 
 local function pollForResults()
-  local args = {}
-  local pendingSessionId = currentPendingSessionId()
-  if pendingSessionId then
-    table.insert(args, pendingSessionId)
-  end
-
-  runControl("next-result", args, function(response, err)
+  runControl("next-result", function(response, err)
     if err or not response then
       if err then
         hs.printf("dictation poll error: %s", err)
@@ -281,13 +383,19 @@ local function pollForResults()
 
     if response.resultAvailable and response.result then
       local result = response.result
-      removePendingSession(result.sessionId)
+      local resultProfile = nil
+      if result.metrics then
+        resultProfile = result.metrics.transcriptionProfile
+      end
+      resultProfile = resultProfile or removePendingSession(result.sessionId) or "fast"
+      local replacementTarget = replacementTargets[result.sessionId]
+      replacementTargets[result.sessionId] = nil
 
       if result.text and result.text ~= "" then
         if result.salvagePath and result.salvagePath ~= "" then
           hs.printf("dictation salvage: %s", result.salvagePath)
         end
-        pasteTranscript(result.text)
+        pasteTranscript(result.text, resultProfile, result.sessionId, replacementTarget)
       elseif result.errorMessage and result.errorMessage ~= "" then
         alert(result.errorMessage)
         hs.printf("dictation error: %s", result.errorMessage)
@@ -333,9 +441,11 @@ local function restoreState()
     pendingCount = response.pendingCount or 0
     if response.status.recording then
       recordState = "recording"
-      showRecordingOverlay()
+      recordProfile = response.status.recordingProfile or "fast"
+      showRecordingOverlay(recordProfile)
     else
       recordState = "idle"
+      recordProfile = "fast"
       hideRecordingOverlay()
     end
 
@@ -347,9 +457,42 @@ local function restoreState()
   end)
 end
 
-local function startRecording()
+local function watchDaemonStatus()
+  if recordState == "starting" or recordState == "stopping" then
+    return
+  end
+
+  runControl("status", function(response, err)
+    if err or not response or not response.status then
+      return
+    end
+
+    pendingCount = response.pendingCount or response.status.pendingCount or pendingCount or 0
+    if response.status.recording then
+      local observedProfile = response.status.recordingProfile or recordProfile or "fast"
+      if recordState ~= "recording" or recordProfile ~= observedProfile or not recordingOverlay then
+        showRecordingOverlay(observedProfile)
+      end
+      recordState = "recording"
+      recordProfile = observedProfile
+    elseif recordState == "recording" then
+      recordState = "idle"
+      recordProfile = "fast"
+      hideRecordingOverlay()
+    end
+
+    maybeWarnAboutStatus(response.status)
+
+    if pendingCount > 0 then
+      ensureResultPolling()
+    end
+  end)
+end
+
+local function startRecording(profile)
+  profile = profile or "fast"
   if recordState == "recording" then
-    alert("Recording")
+    alert(recordingLabel(recordProfile))
     return
   end
 
@@ -358,20 +501,24 @@ local function startRecording()
   end
 
   recordState = "starting"
-  alert("Starting")
+  recordProfile = profile
+  alert(isRobustProfile(profile) and "Starting Robust" or "Starting")
 
-  runControl("start", function(response, err)
+  local command = isRobustProfile(profile) and "start-robust" or "start"
+  runControl(command, function(response, err)
     if err or not response or not response.ok then
       recordState = "idle"
+      recordProfile = "fast"
       hideRecordingOverlay()
       alert(err or response.error or "Start failed")
       return
     end
 
     recordState = "recording"
-    showRecordingOverlay()
+    recordProfile = profile
+    showRecordingOverlay(profile)
     maybeWarnAboutStatus(response.status)
-    alert("Recording")
+    alert(recordingLabel(profile))
   end)
 end
 
@@ -382,10 +529,12 @@ local function stopRecording(discard)
   end
 
   recordState = "stopping"
+  local stoppedProfile = recordProfile
   hideRecordingOverlay()
 
   runControl(discard and "cancel" or "stop", function(response, err)
     recordState = "idle"
+    recordProfile = "fast"
     if err or not response or not response.ok then
       alert(err or response.error or "Stop failed")
       return
@@ -393,14 +542,43 @@ local function stopRecording(discard)
 
     pendingCount = response.pendingCount or pendingCount
     if discard then
-      alert("Recording Canceled")
+      alert(isRobustProfile(stoppedProfile) and "Robust Recording Canceled" or "Recording Canceled")
       return
     end
 
-    enqueuePendingSession(response.sessionId)
+    enqueuePendingSession(response.sessionId, stoppedProfile)
     maybeWarnAboutStatus(response.status)
     ensureResultPolling()
-    alert(string.format("Processing Audio (%d)", pendingCount))
+    alert(string.format("%s (%d)", processingLabel(stoppedProfile), pendingCount))
+  end)
+end
+
+local function retryRobustTranscription()
+  if recordState == "recording" then
+    alert("Stop Recording First")
+    return
+  end
+
+  if recordState == "starting" or recordState == "stopping" then
+    return
+  end
+
+  local replacementTarget = replacementTargetForLastPaste()
+  alert(replacementTarget and "Retrying, Will Replace" or "Retrying Last Audio")
+  runControl("retry-robust", function(response, err)
+    if err or not response or not response.ok then
+      alert(err or response.error or "Retry failed")
+      return
+    end
+
+    pendingCount = response.pendingCount or pendingCount
+    enqueuePendingSession(response.sessionId, "robust")
+    if response.sessionId and replacementTarget then
+      replacementTargets[response.sessionId] = replacementTarget
+    end
+    maybeWarnAboutStatus(response.status)
+    ensureResultPolling()
+    alert(string.format("Retranscribing Audio (%d)", pendingCount))
   end)
 end
 
@@ -409,6 +587,7 @@ if config then
   controlBin = config.controlBinaryPath
   hs.timer.doAfter(0.05, warmupDaemon)
   hs.timer.doAfter(0.15, restoreState)
+  statusWatchdog = hs.timer.doEvery(2.0, watchDaemonStatus)
   alert("Dictation Ready")
 else
   alert(err or "Dictation config missing")
@@ -418,8 +597,12 @@ hs.hotkey.bind({"cmd"}, ".", function()
   if recordState == "recording" then
     stopRecording(false)
   else
-    startRecording()
+    startRecording("fast")
   end
+end)
+
+hs.hotkey.bind({"cmd"}, ";", function()
+  retryRobustTranscription()
 end)
 
 hs.hotkey.bind({"cmd"}, ",", function()

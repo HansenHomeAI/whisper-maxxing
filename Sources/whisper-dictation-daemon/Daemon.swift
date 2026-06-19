@@ -44,7 +44,11 @@ final class WhisperDictationDaemon: @unchecked Sendable {
         case .warmup:
             return ControlResponse(ok: true)
         case .start:
-            return handleStart()
+            return handleStart(profile: .fast)
+        case .startRobust:
+            return handleStart(profile: .robust)
+        case .retryRobust:
+            return handleRetryRobust()
         case .stop:
             return handleStop(discard: false)
         case .cancel:
@@ -58,9 +62,9 @@ final class WhisperDictationDaemon: @unchecked Sendable {
         }
     }
 
-    private func handleStart() -> ControlResponse {
+    private func handleStart(profile: TranscriptionProfile) -> ControlResponse {
         do {
-            let started = try captureEngine.startSession()
+            let started = try captureEngine.startSession(profile: profile)
             var response = ControlResponse(ok: true)
             response.recording = true
             response.pendingCount = outstandingResultCount()
@@ -82,6 +86,24 @@ final class WhisperDictationDaemon: @unchecked Sendable {
             response.recording = false
             response.pendingCount = outstandingResultCount()
             response.sessionId = capture?.sessionId
+            response.status = makeStatusPayload(recording: false)
+            return response
+        } catch {
+            return ControlResponse(ok: false, error: error.localizedDescription)
+        }
+    }
+
+    private func handleRetryRobust() -> ControlResponse {
+        guard !captureEngine.isRecording() else {
+            return ControlResponse(ok: false, error: "Stop the current recording before retranscribing it.")
+        }
+
+        do {
+            let sessionId = try transcriptionManager.enqueueRobustRetry()
+            var response = ControlResponse(ok: true)
+            response.recording = false
+            response.pendingCount = outstandingResultCount()
+            response.sessionId = sessionId
             response.status = makeStatusPayload(recording: false)
             return response
         } catch {
@@ -121,6 +143,7 @@ final class WhisperDictationDaemon: @unchecked Sendable {
         let captureReadiness = captureEngine.readinessAssessment()
         return StatusPayload(
             recording: recording,
+            recordingProfile: captureEngine.currentRecordingProfile()?.rawValue,
             pendingCount: outstandingResultCount(),
             engineReady: captureReadiness.ready,
             engineHealthMessage: captureHealthMessage(from: captureReadiness),
@@ -128,7 +151,8 @@ final class WhisperDictationDaemon: @unchecked Sendable {
             prebufferAvailableMilliseconds: captureEngine.prebufferAvailableMilliseconds(),
             preferredInputDevice: config.preferredInputDevice,
             defaultInputDevice: captureEngine.defaultInputDeviceName,
-            serverState: transcriptionManager.currentServerState(),
+            serverState: transcriptionManager.currentServerState(for: .fast),
+            robustServerState: transcriptionManager.currentServerState(for: .robust),
             availableDiskSpaceBytes: diskStatus?.availableBytes,
             lowDiskSpaceMessage: lowDiskSpaceMessage(from: diskStatus)
         )
