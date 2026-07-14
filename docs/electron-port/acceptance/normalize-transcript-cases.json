@@ -1,0 +1,22 @@
+{
+  "source": "normalizeTranscript in hammerspoon/init.lua @ feature/electron-port base (1e7a840)",
+  "note": "Port the function 1:1 (trim; whole-string placeholder-marker check; case-sensitive placeholder pattern removal; per-line whitespace collapse; strip space before ,.!?;: ; join non-empty lines with \\n; require at least one alphanumeric). null means the transcript is rejected and the UX shows 'No Output'. The runner must execute every case and assert executedCaseCount === cases.length.",
+  "cases": [
+    { "name": "plain text passes through", "input": "hello world", "expect": "hello world" },
+    { "name": "surrounding whitespace trimmed", "input": "  hello world \n", "expect": "hello world" },
+    { "name": "empty is rejected", "input": "", "expect": null },
+    { "name": "whitespace-only is rejected", "input": "   \n\t ", "expect": null },
+    { "name": "blank audio marker bracket is rejected", "input": "[BLANK_AUDIO]", "expect": null },
+    { "name": "blank audio marker mixed case whole-string is rejected", "input": "(blank audio)", "expect": null },
+    { "name": "silence marker is rejected", "input": "[silence]", "expect": null },
+    { "name": "no-speech marker is rejected", "input": "[NO_SPEECH]", "expect": null },
+    { "name": "uppercase placeholder stripped from real content", "input": "[BLANK_AUDIO] real words", "expect": "real words" },
+    { "name": "placeholder in parentheses stripped from real content", "input": "real words (NO_SPEECH) more words", "expect": "real words more words" },
+    { "name": "internal runs of spaces and tabs collapse", "input": "a \t  b\t\tc", "expect": "a b c" },
+    { "name": "space before punctuation stripped", "input": "hello , world . yes !", "expect": "hello, world. yes!" },
+    { "name": "empty lines dropped and lines joined with newline", "input": "line one\n\n   \nline two", "expect": "line one\nline two" },
+    { "name": "windows and mac line endings normalized", "input": "hi\r\nthere\rfriend", "expect": "hi\nthere\nfriend" },
+    { "name": "punctuation-only content is rejected", "input": "... ?! ,", "expect": null },
+    { "name": "per-line leading and trailing whitespace trimmed", "input": "  first line  \n  second line  ", "expect": "first line\nsecond line" }
+  ]
+}

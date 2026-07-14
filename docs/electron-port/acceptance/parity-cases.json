@@ -1,0 +1,193 @@
+{
+  "source": "Tests/TranscriptQualityTests/main.swift @ feature/electron-port base (1e7a840)",
+  "note": "Every case below must be executed by app/tests/unit/parity.spec.ts. The runner must assert executedCaseCount === total cases in this file. Semantics must match the Swift implementations referenced per section.",
+  "transcriptQuality": {
+    "reference": "Sources/WhisperDictationCore/TranscriptQuality.swift",
+    "cases": [
+      {
+        "name": "long audio with tiny transcript requires second pass",
+        "text": "Okay. Go ahead.",
+        "audioDurationMilliseconds": 45000,
+        "expect": { "requiresSecondPass": true, "reason": "long-audio-short-transcript" }
+      },
+      {
+        "name": "long audio with expected word volume passes",
+        "textRepeat": { "unit": "voice typing should preserve the full task clearly", "count": 8, "separator": " " },
+        "audioDurationMilliseconds": 45000,
+        "expect": { "requiresSecondPass": false, "reason": null }
+      },
+      {
+        "name": "short audio with short transcript passes",
+        "text": "Yes.",
+        "audioDurationMilliseconds": 1200,
+        "expect": { "requiresSecondPass": false, "reason": null }
+      },
+      {
+        "name": "reported long-task failure requires second pass",
+        "text": "Okay we need to basically go from our standard right now we are space for a I'll see in.\nMuch as possible.\nThe best is can you please investigate and. Yeah. Go ahead and. Come with a good game plan.",
+        "audioDurationMilliseconds": 60000,
+        "expect": { "requiresSecondPass": true, "reason": "long-audio-short-transcript" }
+      }
+    ]
+  },
+  "captureIntegrity": {
+    "reference": "Sources/WhisperDictationCore/CaptureIntegrity.swift",
+    "cases": [
+      {
+        "name": "large capture duration gap is rejected",
+        "capturedAudioMilliseconds": 21300,
+        "prebufferMilliseconds": 1000,
+        "captureWallClockMilliseconds": 60000,
+        "expect": { "requiresFailure": true, "reason": "capture-duration-gap" }
+      },
+      {
+        "name": "full coverage is accepted",
+        "capturedAudioMilliseconds": 61000,
+        "prebufferMilliseconds": 1000,
+        "captureWallClockMilliseconds": 60000,
+        "expect": { "requiresFailure": false, "reason": null }
+      },
+      {
+        "name": "short captures are not over-policed",
+        "capturedAudioMilliseconds": 2600,
+        "prebufferMilliseconds": 1000,
+        "captureWallClockMilliseconds": 3000,
+        "expect": { "requiresFailure": false, "reason": null }
+      },
+      {
+        "name": "prebuffer-only capture is rejected even when short",
+        "capturedAudioMilliseconds": 1000,
+        "prebufferMilliseconds": 1000,
+        "captureWallClockMilliseconds": 2300,
+        "expect": { "requiresFailure": true, "reason": "capture-stalled" }
+      }
+    ]
+  },
+  "captureReadiness": {
+    "reference": "Sources/WhisperDictationCore/CaptureReadiness.swift",
+    "cases": [
+      {
+        "name": "stale buffers are not ready",
+        "engineRunning": true,
+        "startupSignaled": true,
+        "secondsSinceLastBuffer": 3.5,
+        "expect": { "ready": false, "reason": "capture-buffer-stale" }
+      },
+      {
+        "name": "fresh running engine is ready",
+        "engineRunning": true,
+        "startupSignaled": true,
+        "secondsSinceLastBuffer": 0.2,
+        "expect": { "ready": true, "reason": null }
+      }
+    ]
+  },
+  "captureRestartPolicy": {
+    "reference": "Sources/WhisperDictationCore/CaptureRestartPolicy.swift",
+    "cases": [
+      {
+        "name": "repeated failures escalate to process restart",
+        "consecutiveFailureCount": 3,
+        "expect": { "action": "restartProcess", "reason": "capture-restart-failed-repeatedly" }
+      },
+      {
+        "name": "first failure retries in-process",
+        "consecutiveFailureCount": 1,
+        "expect": { "action": "retry", "reason": "capture-restart-failed" }
+      }
+    ]
+  },
+  "sessionResultBuffer": {
+    "reference": "Sources/WhisperDictationCore/SessionResultBuffer.swift",
+    "cases": [
+      {
+        "name": "requested recording returned without discarding earlier results",
+        "ops": [
+          { "op": "append", "sessionId": "recording-a", "text": "transcript A" },
+          { "op": "append", "sessionId": "recording-b", "text": "transcript B" },
+          { "op": "popNext", "sessionId": "recording-b", "expectSessionId": "recording-b", "expectText": "transcript B" },
+          { "op": "count", "expect": 1 },
+          { "op": "popNext", "expectSessionId": "recording-a", "expectText": "transcript A" },
+          { "op": "count", "expect": 0 }
+        ]
+      },
+      {
+        "name": "results preserved while requested recording is pending",
+        "ops": [
+          { "op": "append", "sessionId": "recording-a", "text": "transcript A" },
+          { "op": "popNext", "sessionId": "recording-b", "expectNull": true },
+          { "op": "count", "expect": 1 }
+        ]
+      }
+    ]
+  },
+  "appConfig": {
+    "reference": "Sources/WhisperDictationCore/AppConfig.swift",
+    "cases": [
+      {
+        "name": "legacy config defaults newer fields",
+        "config": {
+          "controlHost": "127.0.0.1", "controlPort": 44123,
+          "preferredInputDevice": null, "enforcePreferredInputDevice": false,
+          "prebufferMilliseconds": 1000, "audioBufferSizeFrames": 128,
+          "pollIntervalMilliseconds": 150,
+          "whisperServerBinary": "/tmp/whisper-server", "whisperCliBinary": "/tmp/whisper-cli",
+          "whisperModelPath": "/tmp/model.bin", "whisperVADModelPath": null,
+          "whisperServerHost": "127.0.0.1", "whisperServerPort": 8177,
+          "tempDirectory": "/tmp/WhisperDictation", "salvageDirectory": "/tmp/WhisperSalvage",
+          "daemonLogPath": "/tmp/daemon.log", "whisperServerLogPath": "/tmp/whisper-server.log",
+          "controlBinaryPath": "/tmp/whisper-dictation-ctl", "daemonBinaryPath": "/tmp/whisper-dictation-daemon",
+          "warmServerOnLaunch": true, "whisperThreads": 4
+        },
+        "expect": {
+          "persistRecentCaptures": false,
+          "whisperRobustModelPath": null,
+          "robustWhisperServerPort": 8178,
+          "warmRobustServerOnLaunch": false,
+          "serverRequestTimeoutSeconds": 30,
+          "robustServerRequestTimeoutSeconds": 120,
+          "cliTimeoutSeconds": 90
+        }
+      },
+      {
+        "name": "robust fields decode and robust log path derives from fast log",
+        "configDelta": {
+          "whisperModelPath": "/tmp/small.bin",
+          "whisperRobustModelPath": "/tmp/large-v3.bin",
+          "robustWhisperServerPort": 8178,
+          "warmRobustServerOnLaunch": false,
+          "persistRecentCaptures": false,
+          "serverRequestTimeoutSeconds": 30,
+          "robustServerRequestTimeoutSeconds": 120,
+          "cliTimeoutSeconds": 90
+        },
+        "expect": {
+          "whisperRobustModelPath": "/tmp/large-v3.bin",
+          "robustWhisperServerPort": 8178,
+          "robustServerRequestTimeoutSeconds": 120,
+          "robustWhisperServerLogFilename": "whisper-server-robust.log"
+        }
+      },
+      {
+        "name": "non-loopback control host is rejected",
+        "configDelta": { "controlHost": "0.0.0.0" },
+        "expect": { "throws": true }
+      },
+      {
+        "name": "loopback aliases are accepted",
+        "hosts": ["127.0.0.1", "localhost", "::1", " LOCALHOST "],
+        "expect": { "isLoopback": true }
+      }
+    ]
+  },
+  "controlProtocol": {
+    "reference": "Sources/WhisperDictationCore/ControlProtocol.swift",
+    "cases": [
+      {
+        "name": "retry-robust command round-trips through JSON",
+        "request": { "command": "retryRobust", "sessionId": null },
+        "expect": { "command": "retryRobust", "sessionId": null }
+      }
+    ]
+  }
+}
