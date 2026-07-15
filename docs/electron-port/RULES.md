@@ -71,3 +71,7 @@ The core agent may APPEND clarifying rules under "Amendments" below; amendments 
   throw synchronously, begin with `Promise.resolve().then(() => operation())` before
   `.catch(report)`; wrapping an already-invoked expression does not adopt a synchronous
   throw and is not an error boundary.
+- A4 (stale async state recurrence): An epoch or generation guard must be rechecked after
+  every awaited operation before a background response mutates controller state. A check
+  made only before an awaited renderer, socket, or alert call does not prevent an older
+  task from overwriting a newer user action.
