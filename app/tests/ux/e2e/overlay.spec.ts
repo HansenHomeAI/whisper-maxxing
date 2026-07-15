@@ -1,16 +1,29 @@
-import net from "node:net";
+import { access, readFile } from "node:fs/promises";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { _electron as electron, expect, test } from "@playwright/test";
+import { build } from "vite";
 
-import { overlayDataUrl } from "../../../src/renderer/overlay/overlayDocument.js";
+import { sendJSONSocketRequest } from "../../../src/core/jsonSocket.js";
+
+const appRoot = path.resolve(import.meta.dirname, "../../..");
 
 test("control start and stop show a pixel-verified recording pill", async ({}, testInfo) => {
+  await build({
+    configFile: path.join(appRoot, "vite.config.ts"),
+    logLevel: "silent",
+  });
+  const rendererPath = path.join(appRoot, "dist-renderer", "overlay", "index.html");
+  await assertProductionRenderer(rendererPath);
   const electronApp = await electron.launch({
     args: ["tests/ux/fixtures/overlayHarness.cjs"],
-    env: { ...process.env, OVERLAY_DOCUMENT: overlayDataUrl() },
+    env: {
+      ...process.env,
+      WD_E2E_OVERLAY_URL: pathToFileURL(rendererPath).href,
+    },
   });
   try {
-    const page = await electronApp.firstWindow();
     const readControlPort = () =>
       electronApp.evaluate(() => {
         return (
@@ -23,7 +36,14 @@ test("control start and stop show a pixel-verified recording pill", async ({}, t
       throw new Error("Overlay control port was not published");
     }
 
-    await sendControl(controlPort, "start");
+    const startResponse = await sendJSONSocketRequest(
+      { command: "start" },
+      "127.0.0.1",
+      controlPort,
+    );
+    expect(startResponse.ok).toBe(true);
+    const page = await electronApp.firstWindow();
+    await expect(page).toHaveTitle("WhisperDictation Overlay");
     await expect(page.getByTestId("recording-pill")).toBeVisible();
     await expect(page.getByTestId("recording-pill")).toContainText("Recording");
     await page.screenshot({ path: testInfo.outputPath("recording-overlay.png") });
@@ -57,7 +77,32 @@ test("control start and stop show a pixel-verified recording pill", async ({}, t
     });
     expect(redPixels).toBeGreaterThan(50);
 
-    await sendControl(controlPort, "stop");
+    const placement = await electronApp.evaluate(({ BrowserWindow, screen }) => {
+      const window = BrowserWindow.getAllWindows()[0];
+      if (!window) {
+        throw new Error("Overlay window is missing");
+      }
+      return {
+        actual: window.getBounds(),
+        workArea: screen.getPrimaryDisplay().workArea,
+        focusable: window.isFocusable(),
+      };
+    });
+    expect(placement.focusable).toBe(false);
+    expect(placement.actual.x).toBe(
+      Math.round(placement.workArea.x + (placement.workArea.width - 520) / 2),
+    );
+    expect(placement.actual.y).toBe(
+      Math.round(placement.workArea.y + placement.workArea.height - 100 - 20),
+    );
+
+    const stopResponse = await sendJSONSocketRequest(
+      { command: "stop" },
+      "127.0.0.1",
+      controlPort,
+    );
+    expect(stopResponse.ok).toBe(true);
+    await expect(page.getByTestId("recording-pill")).toBeHidden();
     await expect
       .poll(() =>
         electronApp.evaluate(({ BrowserWindow }) =>
@@ -70,28 +115,18 @@ test("control start and stop show a pixel-verified recording pill", async ({}, t
   }
 });
 
-async function sendControl(port: number, command: "start" | "stop"): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port }, () => {
-      socket.write(`${JSON.stringify({ command })}\n`);
-    });
-    let response = "";
-    socket.setEncoding("utf8");
-    socket.on("data", (chunk) => {
-      response += chunk;
-    });
-    socket.on("end", () => {
-      try {
-        const decoded = JSON.parse(response) as { ok?: boolean };
-        if (!decoded.ok) {
-          reject(new Error(`Control command failed: ${response}`));
-          return;
-        }
-        resolve();
-      } catch (error) {
-        reject(error);
-      }
-    });
-    socket.on("error", reject);
-  });
+async function assertProductionRenderer(rendererPath: string): Promise<void> {
+  const html = await readFile(rendererPath, "utf8");
+  expect(html).toContain("WhisperDictation Overlay");
+  expect(html).not.toContain("main.ts");
+  const references = [...html.matchAll(/(?:src|href)="([^"]+)"/g)]
+    .map((match) => match[1])
+    .filter((reference): reference is string => reference !== undefined);
+  expect(references.length).toBeGreaterThan(0);
+  for (const reference of references) {
+    expect(reference.startsWith("/")).toBe(false);
+    await expect(
+      access(path.resolve(path.dirname(rendererPath), reference)),
+    ).resolves.toBeUndefined();
+  }
 }

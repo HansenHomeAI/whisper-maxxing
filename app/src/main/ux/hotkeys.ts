@@ -27,9 +27,13 @@ export function registerUxHotkeys(
   try {
     for (const [accelerator, action] of registrations) {
       const accepted = registrar.register(accelerator, () => {
-        void action().catch((error: unknown) =>
-          onError(error instanceof Error ? error : new Error(String(error))),
-        );
+        void action().catch((error: unknown) => {
+          try {
+            onError(error instanceof Error ? error : new Error(String(error)));
+          } catch (reportError) {
+            console.error("hotkey error reporter failed", reportError);
+          }
+        });
       });
       if (!accepted) {
         throw new Error(`Unable to register global shortcut ${accelerator}`);

@@ -37,9 +37,16 @@ export function createUxSubsystem(options: UxSubsystemOptions): UxSubsystem {
   const surface = (label: string, error: unknown): void => {
     const message = error instanceof Error ? error.message : String(error);
     logger.error(`${label}: ${message}`);
-    void Promise.resolve(options.alerts.showAlert(message)).catch((alertError: unknown) => {
-      logger.error(`alert error: ${String(alertError)}`);
-    });
+    void Promise.resolve()
+      .then(() => options.alerts.showAlert(message))
+      .catch((alertError: unknown) => {
+        logger.error(`alert error: ${String(alertError)}`);
+      });
+  };
+  const runDetached = (label: string, operation: () => Promise<void>): void => {
+    void Promise.resolve()
+      .then(operation)
+      .catch((error: unknown) => surface(label, error));
   };
 
   return {
@@ -51,14 +58,14 @@ export function createUxSubsystem(options: UxSubsystemOptions): UxSubsystem {
       );
       startupTimers.push(
         schedule(() => {
-          void options.controller.warmup();
+          runDetached("warmup callback error", () => options.controller.warmup());
         }, UX_MILLISECONDS.warmupDelay),
         schedule(() => {
-          void options.controller.restoreState();
+          runDetached("restore callback error", () => options.controller.restoreState());
         }, UX_MILLISECONDS.restoreStateDelay),
       );
       watchdog = intervalScheduler.setInterval(() => {
-        void options.controller.watchDaemonStatus();
+        runDetached("watchdog callback error", () => options.controller.watchDaemonStatus());
       }, UX_MILLISECONDS.statusWatchdogInterval);
       await options.alerts.showAlert(UX_CONTRACT.alerts.ready);
     },

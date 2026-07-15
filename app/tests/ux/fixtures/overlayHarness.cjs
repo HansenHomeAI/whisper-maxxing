@@ -1,67 +1,107 @@
-const { app, BrowserWindow } = require("electron");
-const net = require("node:net");
+require("tsx/cjs");
 
-const documentUrl = process.env.OVERLAY_DOCUMENT;
-if (!documentUrl) {
-  throw new Error("OVERLAY_DOCUMENT is required");
+const { app } = require("electron");
+const { JSONSocketServer, sendJSONSocketRequest } = require("../../../src/core/jsonSocket.ts");
+const { DictationController } = require("../../../src/main/ux/dictationController.ts");
+const { OverlayWindow } = require("../../../src/main/ux/overlayWindow.ts");
+
+const rendererUrl = process.env.WD_E2E_OVERLAY_URL;
+if (!rendererUrl) {
+  throw new Error("WD_E2E_OVERLAY_URL is required");
 }
 
-let server;
+let backendServer;
+let uxServer;
+let overlay;
 
-app.whenReady().then(async () => {
-  const window = new BrowserWindow({
-    width: 520,
-    height: 100,
-    show: false,
-    frame: false,
-    transparent: true,
-    focusable: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
+function daemonStatus(recording, profile = null) {
+  return {
+    recording,
+    recordingProfile: profile,
+    pendingCount: 0,
+    engineReady: true,
+    prebufferAvailableMilliseconds: 1_000,
+    serverState: "ready",
+  };
+}
+
+async function startHarness() {
+  await app.whenReady();
+  let recording = false;
+  let profile = "fast";
+
+  backendServer = new JSONSocketServer("127.0.0.1", 0, async (request) => {
+    switch (request.command) {
+      case "warmup":
+        return { ok: true };
+      case "start":
+      case "startRobust":
+        recording = true;
+        profile = request.command === "startRobust" ? "robust" : "fast";
+        return { ok: true, sessionId: "overlay-session", status: daemonStatus(true, profile) };
+      case "stop":
+        recording = false;
+        return { ok: true, sessionId: "overlay-session", pendingCount: 0, status: daemonStatus(false) };
+      case "cancel":
+        recording = false;
+        return { ok: true, pendingCount: 0, status: daemonStatus(false) };
+      case "status":
+        return { ok: true, pendingCount: 0, status: daemonStatus(recording, recording ? profile : null) };
+      case "nextResult":
+        return { ok: true, pendingCount: 0, resultAvailable: false };
+      default:
+        return { ok: false, error: `Unsupported harness command: ${request.command}` };
+    }
+  });
+  const backendAddress = await backendServer.start();
+  overlay = new OverlayWindow({
+    onError: (error) => console.error("production overlay error", error),
+    rendererUrl,
+  });
+  const controller = new DictationController({
+    controlClient: {
+      send: (request) =>
+        sendJSONSocketRequest(request, "127.0.0.1", backendAddress.port),
+    },
+    alerts: overlay,
+    overlay,
+    pasteEngine: {
+      frontmostAppIdentity: async () => "overlay-harness",
+      paste: async () => undefined,
     },
   });
-  window.setIgnoreMouseEvents(true);
-  await window.loadURL(documentUrl);
 
-  server = net.createServer((socket) => {
-    socket.setEncoding("utf8");
-    let buffer = "";
-    socket.on("data", async (chunk) => {
-      buffer += chunk;
-      const newline = buffer.indexOf("\n");
-      if (newline < 0) return;
-      const request = JSON.parse(buffer.slice(0, newline));
-      if (request.command === "start") {
-        await window.webContents.executeJavaScript(
-          'window.whisperOverlay.render({recording:{profile:"fast",label:"Recording"},alert:null})',
-        );
-        window.showInactive();
-        socket.end('{"ok":true}\n');
-        return;
-      }
-      if (request.command === "stop") {
-        await window.webContents.executeJavaScript(
-          "window.whisperOverlay.render({recording:null,alert:null})",
-        );
-        window.hide();
-        socket.end('{"ok":true}\n');
-        return;
-      }
-      socket.end('{"ok":false,"error":"unknown command"}\n');
-    });
-    socket.on("error", (error) => console.error("overlay control socket error", error));
+  uxServer = new JSONSocketServer("127.0.0.1", 0, async (request) => {
+    if (request.command === "start") {
+      await controller.startRecording("fast");
+      return { ok: true };
+    }
+    if (request.command === "stop") {
+      await controller.stopRecording(false);
+      return { ok: true };
+    }
+    if (request.command === "status") {
+      const snapshot = controller.snapshot();
+      return {
+        ok: true,
+        pendingCount: snapshot.pendingCount,
+        status: daemonStatus(snapshot.state === "recording", snapshot.profile),
+      };
+    }
+    return { ok: false, error: `Unsupported UX command: ${request.command}` };
   });
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const address = server.address();
-  if (!address || typeof address === "string") {
-    throw new Error("Unable to read overlay control address");
-  }
-  globalThis.__overlayControlPort = address.port;
+  const uxAddress = await uxServer.start();
+  globalThis.__overlayControlPort = uxAddress.port;
+}
+
+void startHarness().catch((error) => {
+  console.error("overlay harness startup failed", error);
+  app.exit(1);
 });
 
-app.on("before-quit", () => server?.close());
+app.on("before-quit", () => {
+  overlay?.close();
+  void Promise.all([uxServer?.stop(), backendServer?.stop()]).catch((error) => {
+    console.error("overlay harness shutdown failed", error);
+  });
+});

@@ -63,6 +63,9 @@ export class DictationController {
   private pollTimer: unknown | null = null;
   private pollInFlight = false;
   private lastHealthWarningAt = Number.NEGATIVE_INFINITY;
+  private stateEpoch = 0;
+  private statusSequence = 0;
+  private lastAppliedStatusSequence = 0;
 
   constructor(options: DictationControllerOptions) {
     this.controlClient = options.controlClient;
@@ -111,6 +114,7 @@ export class DictationController {
       return;
     }
 
+    this.stateEpoch += 1;
     this.state = "starting";
     this.profile = profile;
     await this.showAlert(
@@ -143,9 +147,16 @@ export class DictationController {
       return;
     }
 
+    this.stateEpoch += 1;
     this.state = "stopping";
     const stoppedProfile = this.profile;
-    await this.overlay.hideRecording();
+    let hideError: unknown = null;
+    try {
+      await this.overlay.hideRecording();
+    } catch (error) {
+      hideError = error;
+      this.logger.error(`dictation overlay hide error: ${errorMessage(error, "Overlay failed")}`);
+    }
 
     try {
       const response = await this.controlClient.send({ command: discard ? "cancel" : "stop" });
@@ -162,6 +173,9 @@ export class DictationController {
             ? UX_CONTRACT.alerts.recordingCanceledRobust
             : UX_CONTRACT.alerts.recordingCanceled,
         );
+        if (hideError !== null) {
+          await this.surfaceOperationalError("dictation overlay hide error", hideError);
+        }
         return;
       }
 
@@ -171,10 +185,16 @@ export class DictationController {
       await this.showAlert(
         withPendingCount(this.processingLabel(stoppedProfile), this.pendingCount),
       );
+      if (hideError !== null) {
+        await this.surfaceOperationalError("dictation overlay hide error", hideError);
+      }
     } catch (error) {
       this.state = "idle";
       this.profile = "fast";
       await this.showAlert(errorMessage(error, UX_CONTRACT.alerts.stopFailed));
+      if (hideError !== null) {
+        await this.surfaceOperationalError("dictation overlay hide error", hideError);
+      }
     }
   }
 
@@ -190,6 +210,7 @@ export class DictationController {
     if (this.state === "starting" || this.state === "stopping") {
       return;
     }
+    this.stateEpoch += 1;
 
     const replacementTarget = await this.replacementTargetForLastPaste();
     await this.showAlert(
@@ -219,10 +240,14 @@ export class DictationController {
   }
 
   async restoreState(): Promise<void> {
+    const observation = this.beginStatusObservation();
     try {
       const response = await this.controlClient.send({ command: "status" });
       if (!response.ok || !response.status) {
         throw new Error(response.error ?? "Unable to restore dictation state");
+      }
+      if (!this.acceptStatusObservation(observation)) {
+        return;
       }
       this.pendingCount = response.pendingCount ?? response.status.pendingCount;
       await this.reconcileRecordingState(response.status, true);
@@ -239,10 +264,14 @@ export class DictationController {
     if (this.state === "starting" || this.state === "stopping") {
       return;
     }
+    const observation = this.beginStatusObservation();
     try {
       const response = await this.controlClient.send({ command: "status" });
       if (!response.ok || !response.status) {
         throw new Error(response.error ?? "Unable to watch dictation status");
+      }
+      if (!this.acceptStatusObservation(observation)) {
+        return;
       }
       this.pendingCount = response.pendingCount ?? response.status.pendingCount;
       await this.reconcileRecordingState(response.status, false);
@@ -282,6 +311,7 @@ export class DictationController {
   }
 
   stop(): void {
+    this.stateEpoch += 1;
     this.stopResultPolling();
   }
 
@@ -307,7 +337,7 @@ export class DictationController {
       return;
     }
     this.pollTimer = this.scheduler.setInterval(() => {
-      void this.pollForResults();
+      this.runDetached("dictation poll callback error", () => this.pollForResults());
     }, UX_MILLISECONDS.resultPollInterval);
   }
 
@@ -427,6 +457,36 @@ export class DictationController {
     const message = errorMessage(error, prefix);
     this.logger.error(`${prefix}: ${message}`);
     await this.showAlert(message);
+  }
+
+  private beginStatusObservation(): { epoch: number; sequence: number } {
+    this.statusSequence += 1;
+    return { epoch: this.stateEpoch, sequence: this.statusSequence };
+  }
+
+  private acceptStatusObservation(observation: { epoch: number; sequence: number }): boolean {
+    if (
+      observation.epoch !== this.stateEpoch ||
+      observation.sequence < this.lastAppliedStatusSequence
+    ) {
+      return false;
+    }
+    this.lastAppliedStatusSequence = observation.sequence;
+    return true;
+  }
+
+  private runDetached(label: string, operation: () => Promise<void>): void {
+    void Promise.resolve()
+      .then(operation)
+      .catch((error: unknown) => {
+        const message = errorMessage(error, label);
+        this.logger.error(`${label}: ${message}`);
+        void Promise.resolve()
+          .then(() => this.alerts.showAlert(message))
+          .catch((alertError: unknown) => {
+            this.logger.error(`${label} alert error: ${errorMessage(alertError, "Alert failed")}`);
+          });
+      });
   }
 
   private logSalvage(path: string | null | undefined): void {

@@ -5,7 +5,10 @@ import {
   registerUxHotkeys,
   type HotkeyRegistrar,
 } from "../../src/main/ux/hotkeys.js";
-import { overlayBounds } from "../../src/main/ux/overlayWindow.js";
+import {
+  overlayBounds,
+  primaryDisplayWorkArea,
+} from "../../src/main/ux/overlayWindow.js";
 import { UX_CONTRACT } from "../../src/main/ux/uxContract.js";
 
 describe("UX hotkeys", () => {
@@ -57,5 +60,19 @@ describe("overlay geometry", () => {
       width: 520,
       height: 100,
     });
+  });
+
+  it("uses the primary display like Hammerspoon mainScreen", () => {
+    let primaryCalls = 0;
+    const workArea = { x: 0, y: 0, width: 1_920, height: 1_080 };
+    expect(
+      primaryDisplayWorkArea({
+        getPrimaryDisplay() {
+          primaryCalls += 1;
+          return { workArea };
+        },
+      }),
+    ).toBe(workArea);
+    expect(primaryCalls).toBe(1);
   });
 });

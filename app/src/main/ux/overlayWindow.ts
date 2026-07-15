@@ -1,9 +1,9 @@
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+
 import type { BrowserWindow, Rectangle } from "electron";
 
-import {
-  overlayDataUrl,
-  type OverlayRenderState,
-} from "../../renderer/overlay/overlayDocument.js";
+import type { OverlayRenderState } from "../../renderer/overlay/types.js";
 import type { AlertSink, OverlaySink, TranscriptionProfile } from "./types.js";
 import { UX_CONTRACT, UX_MILLISECONDS } from "./uxContract.js";
 
@@ -12,17 +12,20 @@ const WINDOW_HEIGHT = 100;
 
 export interface OverlayWindowOptions {
   onError?: (error: Error) => void;
+  rendererUrl?: string;
 }
 
 export class OverlayWindow implements AlertSink, OverlaySink {
   private window: BrowserWindow | null = null;
   private readonly onError: (error: Error) => void;
+  private readonly rendererUrl: string;
   private recording: OverlayRenderState["recording"] = null;
   private alert: string | null = null;
   private alertGeneration = 0;
 
   constructor(options: OverlayWindowOptions = {}) {
     this.onError = options.onError ?? ((error) => console.error("overlay error", error));
+    this.rendererUrl = options.rendererUrl ?? defaultRendererUrl();
   }
 
   async initialize(): Promise<void> {
@@ -30,8 +33,7 @@ export class OverlayWindow implements AlertSink, OverlaySink {
       return;
     }
     const { BrowserWindow, screen } = await import("electron");
-    const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
-    const bounds = overlayBounds(display.workArea);
+    const bounds = overlayBounds(primaryDisplayWorkArea(screen));
     const window = new BrowserWindow({
       ...bounds,
       transparent: true,
@@ -59,7 +61,7 @@ export class OverlayWindow implements AlertSink, OverlaySink {
         this.window = null;
       }
     });
-    await window.loadURL(overlayDataUrl());
+    await window.loadURL(this.rendererUrl);
     this.window = window;
     await this.render();
   }
@@ -131,4 +133,24 @@ export function overlayBounds(workArea: Rectangle): Rectangle {
     width: WINDOW_WIDTH,
     height: WINDOW_HEIGHT,
   };
+}
+
+export interface PrimaryDisplaySource {
+  getPrimaryDisplay(): { workArea: Rectangle };
+}
+
+export function primaryDisplayWorkArea(source: PrimaryDisplaySource): Rectangle {
+  return source.getPrimaryDisplay().workArea;
+}
+
+function defaultRendererUrl(): string {
+  return pathToFileURL(
+    path.join(
+      process.resourcesPath,
+      "app.asar",
+      "dist-renderer",
+      "overlay",
+      "index.html",
+    ),
+  ).href;
 }

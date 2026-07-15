@@ -97,6 +97,29 @@ describe("DictationController", () => {
     expect(harness.controller.snapshot().polling).toBe(false);
   });
 
+  it("reaches stop and cancel even when hiding the overlay fails", async () => {
+    const stopHarness = makeHarness([
+      ok({ sessionId: "s1" }),
+      ok({ sessionId: "s1", pendingCount: 1 }),
+    ]);
+    stopHarness.setHideFailure(new Error("renderer unavailable"));
+    await stopHarness.controller.startRecording();
+    await stopHarness.controller.stopRecording(false);
+    expect(stopHarness.requests.map(({ command }) => command)).toEqual(["start", "stop"]);
+    expect(stopHarness.controller.snapshot()).toMatchObject({ state: "idle", polling: true });
+    expect(stopHarness.alerts.at(-1)).toBe("renderer unavailable");
+
+    const cancelHarness = makeHarness([ok({ sessionId: "s2" }), ok()]);
+    cancelHarness.setHideFailure(new Error("renderer unavailable"));
+    await cancelHarness.controller.startRecording();
+    await cancelHarness.controller.cancelRecording();
+    expect(cancelHarness.requests.map(({ command }) => command)).toEqual([
+      "start",
+      "cancel",
+    ]);
+    expect(cancelHarness.controller.snapshot().state).toBe("idle");
+  });
+
   it("guards robust retry while recording", async () => {
     const harness = makeHarness([ok({ sessionId: "s1" })]);
     await harness.controller.startRecording("fast");
@@ -118,6 +141,42 @@ describe("DictationController", () => {
     await harness.controller.watchDaemonStatus();
     expect(harness.controller.snapshot().state).toBe("idle");
     expect(harness.hiddenCount).toBe(1);
+  });
+
+  it("ignores a stale watchdog response after a newer start", async () => {
+    let resolveStatus: ((response: ControlResponse) => void) | undefined;
+    const requests: ControlRequest[] = [];
+    const alerts: string[] = [];
+    const controller = new DictationController({
+      controlClient: {
+        send(request) {
+          requests.push(request);
+          if (request.command === "status") {
+            return new Promise((resolve) => {
+              resolveStatus = resolve;
+            });
+          }
+          return Promise.resolve(ok({ sessionId: "new-session" }));
+        },
+      },
+      alerts: {
+        showAlert(message) {
+          alerts.push(message);
+        },
+      },
+      overlay: { showRecording: () => undefined, hideRecording: () => undefined },
+      pasteEngine: new FakePasteEngine(),
+    });
+
+    const watchdog = controller.watchDaemonStatus();
+    await Promise.resolve();
+    await controller.startRecording();
+    resolveStatus?.(ok({ status: status({ recording: false }) }));
+    await watchdog;
+
+    expect(requests.map(({ command }) => command)).toEqual(["status", "start"]);
+    expect(controller.snapshot().state).toBe("recording");
+    expect(alerts.at(-1)).toBe("Recording");
   });
 
   it("surfaces result errors and logs salvage paths", async () => {
@@ -232,6 +291,28 @@ describe("DictationController", () => {
     expect(pasteHarness.alerts.at(-1)).toBe("Accessibility denied");
   });
 
+  it("reports a detached poll rejection instead of leaking it", async () => {
+    const harness = makeHarness([
+      ok({ sessionId: "s1" }),
+      ok({ sessionId: "s1", pendingCount: 1 }),
+      new Error("socket refused"),
+    ]);
+    await harness.controller.startRecording();
+    await harness.controller.stopRecording(false);
+    harness.setAlertFailure(new Error("alert renderer failed"));
+    for (const callback of harness.scheduler.callbacks.values()) {
+      callback();
+    }
+    await flushPromises();
+    await flushPromises();
+    expect(harness.logErrors).toContain(
+      "dictation poll callback error: alert renderer failed",
+    );
+    expect(harness.logErrors).toContain(
+      "dictation poll callback error alert error: alert renderer failed",
+    );
+  });
+
   it("throttles exact health warnings for 300 seconds", async () => {
     const unhealthy = status({
       engineReady: false,
@@ -260,6 +341,8 @@ function makeHarness(responses: Array<ControlResponse | Error>) {
   const logErrors: string[] = [];
   const logInfo: string[] = [];
   let hiddenCount = 0;
+  let hideFailure: Error | null = null;
+  let alertFailure: Error | null = null;
   const controlClient: ControlClient = {
     async send(request) {
       requests.push(request);
@@ -285,6 +368,9 @@ function makeHarness(responses: Array<ControlResponse | Error>) {
     controlClient,
     alerts: {
       showAlert: (message) => {
+        if (alertFailure) {
+          throw alertFailure;
+        }
         alerts.push(message);
       },
     },
@@ -293,6 +379,9 @@ function makeHarness(responses: Array<ControlResponse | Error>) {
         recordingProfiles.push(profile);
       },
       hideRecording: () => {
+        if (hideFailure) {
+          throw hideFailure;
+        }
         hiddenCount += 1;
       },
     },
@@ -312,7 +401,17 @@ function makeHarness(responses: Array<ControlResponse | Error>) {
     get hiddenCount() {
       return hiddenCount;
     },
+    setHideFailure(error: Error | null) {
+      hideFailure = error;
+    },
+    setAlertFailure(error: Error | null) {
+      alertFailure = error;
+    },
   };
+}
+
+function flushPromises(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 function ok(overrides: Partial<ControlResponse> = {}): ControlResponse {
