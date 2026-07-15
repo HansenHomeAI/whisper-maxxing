@@ -200,6 +200,11 @@ and remains the author's daily driver until sign-off.
   `tests/capture/e2e`, `tests/ux/e2e`, and `tests/settings/e2e`. The frozen npm E2E commands
   target those directories explicitly, and Playwright scans only those three patterns. This
   resolves the original scaffold path mismatch without broadening branch ownership.
+- D12: The renderer production build is a Vite multi-page build rooted at `src/renderer`.
+  It emits the main page plus `settings/index.html` and `capture/capture.html` when those
+  subsystem sources are present, and copies the capture preload/worklet beside the capture
+  page. Production window defaults must resolve these built assets, while tests may inject
+  explicit source or temporary build paths.
 
 ## Pathfinder findings
 
