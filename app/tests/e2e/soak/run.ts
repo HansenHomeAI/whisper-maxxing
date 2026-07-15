@@ -10,6 +10,7 @@ import {
   waitForPendingCount,
   waitForResult,
 } from "../protocol/controlClient.js";
+import { startManagedElectronTarget } from "../protocol/electronTarget.js";
 
 interface CycleReport {
   cycle: number;
@@ -29,13 +30,15 @@ async function main(): Promise<void> {
   const target = targetFromEnvironment();
   const cycles = positiveInteger("SOAK_CYCLES", 50);
   const reportPath = path.resolve(process.env.WD_SOAK_REPORT ?? "soak-report.json");
-  const pidStart = listenerPid(target.port);
-  const reports: CycleReport[] = [];
-  const ownedSessionIds = new Set<string>();
-  let resultsDuplicated = 0;
-
+  const managedElectron = await startManagedElectronTarget(target);
   try {
-    await waitForEngineReady(target);
+    const pidStart = listenerPid(target.port);
+    const reports: CycleReport[] = [];
+    const ownedSessionIds = new Set<string>();
+    let resultsDuplicated = 0;
+
+    try {
+      await waitForEngineReady(target);
     const initialStatus = await sendControl(target, "status");
     if (!initialStatus.ok || initialStatus.status?.recording || initialStatus.status?.pendingCount !== 0) {
       throw new Error("Soak requires an idle daemon with pendingCount 0");
@@ -43,6 +46,7 @@ async function main(): Promise<void> {
 
     for (let index = 0; index < cycles; index += 1) {
       const cycleStartedAt = performance.now();
+      await waitForEngineReady(target);
       const started = await sendControl(target, "start");
       if (!started.ok || !started.sessionId) {
         throw new Error(`Cycle ${index + 1} failed to start: ${started.error ?? "sessionId missing"}`);
@@ -87,11 +91,11 @@ async function main(): Promise<void> {
         `cycle ${index + 1}/${cycles} ${sessionId} ${outcome} ${latencyMilliseconds.toFixed(1)}ms\n`,
       );
     }
-  } finally {
-    await drainOwnedSessions(target, ownedSessionIds);
-  }
+    } finally {
+      await drainOwnedSessions(target, ownedSessionIds);
+    }
 
-  const pidEnd = listenerPid(target.port);
+    const pidEnd = listenerPid(target.port);
   if (pidStart === null || pidEnd === null) {
     throw new Error(`Unable to determine listener PID on port ${target.port}`);
   }
@@ -119,7 +123,10 @@ async function main(): Promise<void> {
 
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
   JSON.parse(await readFile(reportPath, "utf8"));
-  process.stdout.write(`${JSON.stringify({ ...report, cycles: undefined, reportPath })}\n`);
+    process.stdout.write(`${JSON.stringify({ ...report, cycles: undefined, reportPath })}\n`);
+  } finally {
+    await managedElectron?.stop();
+  }
 }
 
 function percentile(values: number[], fraction: number): number {

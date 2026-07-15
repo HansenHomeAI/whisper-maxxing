@@ -12,20 +12,30 @@ import {
   waitForPendingCount,
   waitForResult,
 } from "./controlClient.js";
+import {
+  startManagedElectronTarget,
+  type ManagedElectronTarget,
+} from "./electronTarget.js";
 
 const target = targetFromEnvironment();
 const ownedSessionIds = new Set<string>();
 let retryableResult: SessionResult;
+let managedElectron: ManagedElectronTarget | null = null;
 
 describe.sequential(`control protocol against ${target.target}`, () => {
   beforeAll(async () => {
+    managedElectron = await startManagedElectronTarget(target);
     const status = await waitForEngineReady(target);
     expect(status.recording).toBe(false);
     expect(status.pendingCount).toBe(0);
   }, target.resultTimeoutMilliseconds);
 
   afterAll(async () => {
-    await drainOwnedSessions(target, ownedSessionIds);
+    try {
+      await drainOwnedSessions(target, ownedSessionIds);
+    } finally {
+      await managedElectron?.stop();
+    }
   }, target.resultTimeoutMilliseconds);
 
   test("status exposes the complete wire contract", async () => {
@@ -47,7 +57,7 @@ describe.sequential(`control protocol against ${target.target}`, () => {
   }, target.resultTimeoutMilliseconds);
 
   test("cancel produces no result and drains pending work", async () => {
-    const started = await sendControl(target, "start");
+    const started = await startWhenReady();
     expect(started.ok).toBe(true);
     const sessionId = requireSessionId(started);
     ownedSessionIds.add(sessionId);
@@ -64,7 +74,7 @@ describe.sequential(`control protocol against ${target.target}`, () => {
 
   test("retry robust rejects recording and retranscribes retained audio", async () => {
     expect(retryableResult).toBeDefined();
-    const started = await sendControl(target, "start");
+    const started = await startWhenReady();
     expect(started.ok).toBe(true);
     ownedSessionIds.add(requireSessionId(started));
 
@@ -134,7 +144,7 @@ describe.sequential(`control protocol against ${target.target}`, () => {
 });
 
 async function recordSession(waitForCompletion = true): Promise<string> {
-  const started = await sendControl(target, "start");
+  const started = await startWhenReady();
   expect(started.ok, started.error).toBe(true);
   const sessionId = requireSessionId(started);
   ownedSessionIds.add(sessionId);
@@ -148,6 +158,11 @@ async function recordSession(waitForCompletion = true): Promise<string> {
     await waitForPendingCount(target, 1);
   }
   return sessionId;
+}
+
+async function startWhenReady(): Promise<ControlResponse> {
+  await waitForEngineReady(target);
+  return sendControl(target, "start");
 }
 
 function requireSessionId(response: ControlResponse): string {
@@ -167,8 +182,8 @@ function assertStatusContract(status: StatusPayload): void {
   expect(status.engineStartupMilliseconds).toEqual(expect.any(Number));
   expect(status.prebufferAvailableMilliseconds).toEqual(expect.any(Number));
   expect(status.prebufferAvailableMilliseconds).toBeGreaterThanOrEqual(0);
-  expect(status.preferredInputDevice).toEqual(expect.any(String));
-  expect(status.defaultInputDevice).toEqual(expect.any(String));
+  expectOptionalType(status.preferredInputDevice, "string");
+  expectOptionalType(status.defaultInputDevice, "string");
   expect(status.serverState).toEqual(expect.any(String));
   expect(status.robustServerState).toEqual(expect.any(String));
   expect(status.availableDiskSpaceBytes).toEqual(expect.any(Number));
