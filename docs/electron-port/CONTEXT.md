@@ -217,6 +217,10 @@ and remains the author's daily driver until sign-off.
   `tests/e2e/protocol/**/*.spec.ts`. The default Vitest config continues excluding every
   `e2e` tree so Playwright specs are never collected as unit tests, while the immutable
   `e2e:protocol` command cannot silently report an empty suite.
+- D15: The production Vite multi-page build includes the overlay renderer when
+  `src/renderer/overlay/index.html` is present. Overlay E2E must load that production
+  artifact through the real `OverlayWindow` and control path; a test-only renderer or
+  direct render call is not UX proof.
 
 ## Pathfinder findings
 
