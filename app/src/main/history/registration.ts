@@ -78,6 +78,7 @@ export function registerSettingsHistory(
         transcriptionMilliseconds: result.metrics.transcriptionMilliseconds ?? 0,
         transcriptionMode: result.metrics.transcriptionMode ?? "unknown",
       });
+      settingsWindow.notifyHistoryChanged();
     },
     dispose() {
       unregister?.();

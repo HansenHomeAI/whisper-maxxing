@@ -262,6 +262,10 @@ and remains the author's daily driver until sign-off.
 - D25: History/settings uses `Command+Control+H` on macOS and `Control+Shift+H` on Windows.
   Plain `Command+H` remains the macOS Hide command; the history binding is deliberately
   outside the parity fixture because it is an additive post-port shortcut.
+- D26: The recording overlay joins every macOS Space, including full-screen Spaces, and
+  uses the screen-saver always-on-top level so it follows the user across applications.
+  An open settings window reloads history immediately after each successful persisted
+  transcription; reopening settings remains idempotent but is not required for refresh.
 
 ## Pathfinder findings
 

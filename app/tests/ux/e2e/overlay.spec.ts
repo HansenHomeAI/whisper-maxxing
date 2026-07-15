@@ -86,9 +86,16 @@ test("control start and stop show a pixel-verified recording pill", async ({}, t
         actual: window.getBounds(),
         workArea: screen.getPrimaryDisplay().workArea,
         focusable: window.isFocusable(),
+        visibleOnAllWorkspaces:
+          process.platform === "darwin"
+            ? window.isVisibleOnAllWorkspaces()
+            : null,
       };
     });
     expect(placement.focusable).toBe(false);
+    if (process.platform === "darwin") {
+      expect(placement.visibleOnAllWorkspaces).toBe(true);
+    }
     expect(placement.actual.x).toBe(
       Math.round(placement.workArea.x + (placement.workArea.width - 520) / 2),
     );

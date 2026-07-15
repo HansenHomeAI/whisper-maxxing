@@ -34,7 +34,7 @@ export class SettingsWindowController {
       }
       this.window.show();
       this.window.focus();
-      this.window.webContents.send("settings:history:reload");
+      this.notifyHistoryChanged();
       return;
     }
 
@@ -69,6 +69,19 @@ export class SettingsWindowController {
       }
       throw error;
     }
+  }
+
+  notifyHistoryChanged(): void {
+    const window = this.window;
+    if (
+      window === null ||
+      window.isDestroyed() ||
+      window.webContents.isDestroyed() ||
+      window.webContents.isLoadingMainFrame()
+    ) {
+      return;
+    }
+    window.webContents.send("settings:history:reload");
   }
 
   dispose(): void {

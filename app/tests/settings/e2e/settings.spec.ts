@@ -100,7 +100,11 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
 
   await waitForReady(recordedPath, errorPath, "recorded");
   await expect(readFile(historyPath, "utf8")).resolves.toContain(recordedNonce);
-  await expect(page.getByText(recordedNonce)).toHaveCount(0);
+  await expect(renderedEntries).toHaveText([
+    recordedNonce,
+    secondNonce,
+    firstNonce,
+  ]);
   await executeFile(process.execPath, [wdctlPath, "open-settings"], {
     env: { ...process.env, WDCTL_CONFIG: configPath },
   });
