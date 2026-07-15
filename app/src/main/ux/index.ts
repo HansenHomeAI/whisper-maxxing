@@ -17,3 +17,4 @@ export type {
   Scheduler,
 } from "./types.js";
 export { UX_CONTRACT, UX_MILLISECONDS, withPendingCount } from "./uxContract.js";
+export { createUxSubsystem, type UxSubsystem } from "./uxSubsystem.js";
