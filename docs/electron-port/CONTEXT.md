@@ -266,6 +266,9 @@ and remains the author's daily driver until sign-off.
   uses the screen-saver always-on-top level so it follows the user across applications.
   An open settings window reloads history immediately after each successful persisted
   transcription; reopening settings remains idempotent but is not required for refresh.
+- D27: The application icon is a flat white outline microphone on a pure-black rounded
+  square. The SVG is the canonical source; macOS ICNS and Windows ICO artifacts carry the
+  same mark without gradients, borders, shadows, or accent colors.
 
 ## Pathfinder findings
 
