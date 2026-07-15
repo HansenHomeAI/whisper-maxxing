@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import {
   sendControl,
+  drainOwnedSessions,
   sleep,
   targetFromEnvironment,
   waitForEngineReady,
@@ -30,61 +31,71 @@ async function main(): Promise<void> {
   const reportPath = path.resolve(process.env.WD_SOAK_REPORT ?? "soak-report.json");
   const pidStart = listenerPid(target.port);
   const reports: CycleReport[] = [];
+  const ownedSessionIds = new Set<string>();
+  let resultsDuplicated = 0;
 
-  await waitForEngineReady(target);
-  const initialStatus = await sendControl(target, "status");
-  if (!initialStatus.ok || initialStatus.status?.recording || initialStatus.status?.pendingCount !== 0) {
-    throw new Error("Soak requires an idle daemon with pendingCount 0");
-  }
-
-  for (let index = 0; index < cycles; index += 1) {
-    const cycleStartedAt = performance.now();
-    const started = await sendControl(target, "start");
-    if (!started.ok || !started.sessionId) {
-      throw new Error(`Cycle ${index + 1} failed to start: ${started.error ?? "sessionId missing"}`);
-    }
-    const sessionId = started.sessionId;
-    await sleep(target.captureMilliseconds);
-
-    const stopped = await sendControl(target, "stop");
-    if (!stopped.ok || stopped.sessionId !== sessionId) {
-      throw new Error(`Cycle ${index + 1} failed to stop its own session: ${stopped.error ?? "id mismatch"}`);
+  try {
+    await waitForEngineReady(target);
+    const initialStatus = await sendControl(target, "status");
+    if (!initialStatus.ok || initialStatus.status?.recording || initialStatus.status?.pendingCount !== 0) {
+      throw new Error("Soak requires an idle daemon with pendingCount 0");
     }
 
-    const result = await waitForResult(target, sessionId);
-    if (result.sessionId !== sessionId) {
-      throw new Error(`Cycle ${index + 1} received result for ${result.sessionId}`);
-    }
-    if (result.metrics.audioDurationMilliseconds <= 0) {
-      throw new Error(`Cycle ${index + 1} produced empty audio metrics`);
-    }
+    for (let index = 0; index < cycles; index += 1) {
+      const cycleStartedAt = performance.now();
+      const started = await sendControl(target, "start");
+      if (!started.ok || !started.sessionId) {
+        throw new Error(`Cycle ${index + 1} failed to start: ${started.error ?? "sessionId missing"}`);
+      }
+      const sessionId = started.sessionId;
+      ownedSessionIds.add(sessionId);
+      await sleep(target.captureMilliseconds);
 
-    const duplicate = await sendControl(target, "nextResult", sessionId);
-    if (!duplicate.ok || duplicate.resultAvailable) {
-      throw new Error(`Cycle ${index + 1} delivered session ${sessionId} more than once`);
-    }
-    await waitForPendingCount(target, 0);
+      const stopped = await sendControl(target, "stop");
+      if (!stopped.ok || stopped.sessionId !== sessionId) {
+        throw new Error(`Cycle ${index + 1} failed to stop its own session: ${stopped.error ?? "id mismatch"}`);
+      }
 
-    const latencyMilliseconds = performance.now() - cycleStartedAt;
-    const outcome = result.errorMessage ? "error" : result.text.trim() ? "transcript" : "no-speech";
-    reports.push({
-      cycle: index + 1,
-      sessionId,
-      latencyMilliseconds,
-      audioDurationMilliseconds: result.metrics.audioDurationMilliseconds,
-      transcriptionMode: result.metrics.transcriptionMode ?? null,
-      outcome,
-    });
-    process.stdout.write(
-      `cycle ${index + 1}/${cycles} ${sessionId} ${outcome} ${latencyMilliseconds.toFixed(1)}ms\n`,
-    );
+      const result = await waitForResult(target, sessionId);
+      if (result.sessionId !== sessionId) {
+        throw new Error(`Cycle ${index + 1} received result for ${result.sessionId}`);
+      }
+      if (result.metrics.audioDurationMilliseconds <= 0) {
+        throw new Error(`Cycle ${index + 1} produced empty audio metrics`);
+      }
+
+      await waitForPendingCount(target, 0);
+      const cycleDuplicates = await countLateDuplicates(target, sessionId);
+      resultsDuplicated += cycleDuplicates;
+      if (cycleDuplicates > 0) {
+        throw new Error(
+          `Cycle ${index + 1} delivered session ${sessionId} ${cycleDuplicates + 1} times`,
+        );
+      }
+
+      const latencyMilliseconds = performance.now() - cycleStartedAt;
+      const outcome = result.errorMessage ? "error" : result.text.trim() ? "transcript" : "no-speech";
+      reports.push({
+        cycle: index + 1,
+        sessionId,
+        latencyMilliseconds,
+        audioDurationMilliseconds: result.metrics.audioDurationMilliseconds,
+        transcriptionMode: result.metrics.transcriptionMode ?? null,
+        outcome,
+      });
+      process.stdout.write(
+        `cycle ${index + 1}/${cycles} ${sessionId} ${outcome} ${latencyMilliseconds.toFixed(1)}ms\n`,
+      );
+    }
+  } finally {
+    await drainOwnedSessions(target, ownedSessionIds);
   }
 
   const pidEnd = listenerPid(target.port);
   if (pidStart === null || pidEnd === null) {
     throw new Error(`Unable to determine listener PID on port ${target.port}`);
   }
-  if (pidStart !== pidEnd && process.env.WD_EXPECT_RESTART !== "1") {
+  if (pidStart !== pidEnd) {
     throw new Error(`Daemon restarted unexpectedly during soak: pid ${pidStart} -> ${pidEnd}`);
   }
 
@@ -97,7 +108,7 @@ async function main(): Promise<void> {
     cyclesRequested: cycles,
     cyclesCompleted: reports.length,
     resultsLost: cycles - reports.length,
-    resultsDuplicated: 0,
+    resultsDuplicated,
     pidStart,
     pidEnd,
     p50Milliseconds: percentile(latencies, 0.5),
@@ -129,11 +140,6 @@ function positiveInteger(name: string, fallback: number): number {
 }
 
 function listenerPid(port: number): number | null {
-  const explicitPid = Number(process.env.WD_DAEMON_PID);
-  if (Number.isInteger(explicitPid) && explicitPid > 0) {
-    return explicitPid;
-  }
-
   try {
     if (process.platform === "win32") {
       const command = `(Get-NetTCPConnection -State Listen -LocalPort ${port} | Select-Object -First 1 -ExpandProperty OwningProcess)`;
@@ -152,4 +158,23 @@ function listenerPid(port: number): number | null {
   } catch {
     return null;
   }
+}
+
+async function countLateDuplicates(
+  target: ReturnType<typeof targetFromEnvironment>,
+  sessionId: string,
+): Promise<number> {
+  const deadline = Date.now() + 750;
+  let duplicates = 0;
+  while (Date.now() < deadline) {
+    const response = await sendControl(target, "nextResult", sessionId);
+    if (!response.ok) {
+      throw new Error(response.error ?? `duplicate check failed for ${sessionId}`);
+    }
+    if (response.resultAvailable) {
+      duplicates += 1;
+    }
+    await sleep(75);
+  }
+  return duplicates;
 }

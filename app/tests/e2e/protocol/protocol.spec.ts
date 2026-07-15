@@ -4,6 +4,7 @@ import {
   type ControlResponse,
   type SessionResult,
   type StatusPayload,
+  drainOwnedSessions,
   sendControl,
   sleep,
   targetFromEnvironment,
@@ -24,14 +25,7 @@ describe.sequential(`control protocol against ${target.target}`, () => {
   }, target.resultTimeoutMilliseconds);
 
   afterAll(async () => {
-    const statusResponse = await sendControl(target, "status");
-    if (statusResponse.status?.recording) {
-      await sendControl(target, "cancel");
-    }
-    for (const sessionId of ownedSessionIds) {
-      await sendControl(target, "nextResult", sessionId);
-    }
-    await waitForPendingCount(target, 0);
+    await drainOwnedSessions(target, ownedSessionIds);
   }, target.resultTimeoutMilliseconds);
 
   test("status exposes the complete wire contract", async () => {
@@ -86,6 +80,24 @@ describe.sequential(`control protocol against ${target.target}`, () => {
     const result = await waitForResult(target, retrySessionId);
     assertResultContract(result, retrySessionId);
     expect(result.metrics.transcriptionProfile).toBe("robust");
+    expect(result.metrics.prebufferMilliseconds).toBe(
+      retryableResult.metrics.prebufferMilliseconds,
+    );
+    expect(result.metrics.audioDurationMilliseconds).toBe(
+      retryableResult.metrics.audioDurationMilliseconds,
+    );
+    expect(result.metrics.captureStartedAtISO8601).toBe(
+      retryableResult.metrics.captureStartedAtISO8601,
+    );
+    expect(result.metrics.captureStoppedAtISO8601).toBe(
+      retryableResult.metrics.captureStoppedAtISO8601,
+    );
+    expect(result.metrics.captureWallClockMilliseconds).toBe(
+      retryableResult.metrics.captureWallClockMilliseconds,
+    );
+    expect(result.metrics.captureCoverageRatio).toBe(
+      retryableResult.metrics.captureCoverageRatio,
+    );
 
     const duplicate = await sendControl(target, "nextResult", retrySessionId);
     expect(duplicate.resultAvailable).toBe(false);
@@ -97,7 +109,10 @@ describe.sequential(`control protocol against ${target.target}`, () => {
 
     const secondResult = await waitForResult(target, secondSessionId);
     assertResultContract(secondResult, secondSessionId);
-    const firstResult = await waitForResult(target, firstSessionId);
+    const firstResponse = await sendControl(target, "nextResult");
+    expect(firstResponse.ok).toBe(true);
+    expect(firstResponse.resultAvailable).toBe(true);
+    const firstResult = firstResponse.result as SessionResult;
     assertResultContract(firstResult, firstSessionId);
 
     expect((await sendControl(target, "nextResult", firstSessionId)).resultAvailable).toBe(false);
@@ -107,6 +122,7 @@ describe.sequential(`control protocol against ${target.target}`, () => {
   test("unknown targeted read neither returns nor discards a result", async () => {
     const sessionId = await recordSession(false);
     const unknownSessionId = `unknown-${randomUUID()}`;
+    await sleep(target.target === "swift" ? 2_000 : 750);
     const unknown = await sendControl(target, "nextResult", unknownSessionId);
     expect(unknown.ok).toBe(true);
     expect(unknown.resultAvailable).toBe(false);
@@ -145,16 +161,17 @@ function assertStatusContract(status: StatusPayload): void {
   expectOptionalType(status.recordingProfile, "string");
   expect(status.pendingCount).toEqual(expect.any(Number));
   expect(Number.isInteger(status.pendingCount)).toBe(true);
+  expect(status.pendingCount).toBeGreaterThanOrEqual(0);
   expect(status.engineReady).toEqual(expect.any(Boolean));
   expectOptionalType(status.engineHealthMessage, "string");
-  expectOptionalType(status.engineStartupMilliseconds, "number");
+  expect(status.engineStartupMilliseconds).toEqual(expect.any(Number));
   expect(status.prebufferAvailableMilliseconds).toEqual(expect.any(Number));
   expect(status.prebufferAvailableMilliseconds).toBeGreaterThanOrEqual(0);
-  expectOptionalType(status.preferredInputDevice, "string");
-  expectOptionalType(status.defaultInputDevice, "string");
+  expect(status.preferredInputDevice).toEqual(expect.any(String));
+  expect(status.defaultInputDevice).toEqual(expect.any(String));
   expect(status.serverState).toEqual(expect.any(String));
-  expectOptionalType(status.robustServerState, "string");
-  expectOptionalType(status.availableDiskSpaceBytes, "number");
+  expect(status.robustServerState).toEqual(expect.any(String));
+  expect(status.availableDiskSpaceBytes).toEqual(expect.any(Number));
   expectOptionalType(status.lowDiskSpaceMessage, "string");
 }
 

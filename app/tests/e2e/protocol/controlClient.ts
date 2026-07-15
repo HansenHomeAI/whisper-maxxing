@@ -65,8 +65,12 @@ export interface ControlTarget {
 
 export function targetFromEnvironment(): ControlTarget {
   const target = process.env.WD_TARGET === "swift" ? "swift" : "electron";
+  const host = process.env.WD_CONTROL_HOST ?? "127.0.0.1";
+  if (!isLoopbackHost(host)) {
+    throw new Error(`WD_CONTROL_HOST must be loopback-only, received ${host}`);
+  }
   return {
-    host: process.env.WD_CONTROL_HOST ?? "127.0.0.1",
+    host,
     port: numberFromEnvironment("WD_CONTROL_PORT", target === "swift" ? 44123 : 44124),
     target,
     requestTimeoutMilliseconds: numberFromEnvironment("WD_REQUEST_TIMEOUT_MS", 5_000),
@@ -189,6 +193,9 @@ export async function waitForPendingCount(
 
   while (Date.now() < deadline) {
     const response = await sendControl(target, "status");
+    if (!response.ok) {
+      throw new Error(response.error ?? "status failed while waiting for pending work");
+    }
     if (response.ok && response.status?.pendingCount === expected) {
       return response.status;
     }
@@ -196,6 +203,55 @@ export async function waitForPendingCount(
   }
 
   throw new Error(`pendingCount did not become ${expected} before timeout`);
+}
+
+export async function drainOwnedSessions(
+  target: ControlTarget,
+  sessionIds: Iterable<string>,
+): Promise<void> {
+  const ids = [...sessionIds];
+  const deadline = Date.now() + target.resultTimeoutMilliseconds;
+  let quietChecks = 0;
+
+  while (Date.now() < deadline) {
+    const statusResponse = await sendControl(target, "status");
+    if (!statusResponse.ok || !statusResponse.status) {
+      throw new Error(statusResponse.error ?? "status failed during cleanup");
+    }
+    if (statusResponse.status.recording) {
+      const cancelled = await sendControl(target, "cancel");
+      if (!cancelled.ok) {
+        throw new Error(cancelled.error ?? "cancel failed during cleanup");
+      }
+    }
+
+    let drained = 0;
+    for (const sessionId of ids) {
+      const response = await sendControl(target, "nextResult", sessionId);
+      if (!response.ok) {
+        throw new Error(response.error ?? `cleanup failed for ${sessionId}`);
+      }
+      if (response.resultAvailable) {
+        drained += 1;
+      }
+    }
+
+    const after = await sendControl(target, "status");
+    if (!after.ok || !after.status) {
+      throw new Error(after.error ?? "status failed after cleanup drain");
+    }
+    if (after.status.pendingCount === 0 && drained === 0) {
+      quietChecks += 1;
+      if (quietChecks >= 3) {
+        return;
+      }
+    } else {
+      quietChecks = 0;
+    }
+    await sleep(150);
+  }
+
+  throw new Error("Owned sessions did not drain before cleanup timeout");
 }
 
 export function sleep(milliseconds: number): Promise<void> {
@@ -212,4 +268,9 @@ function numberFromEnvironment(name: string, fallback: number): number {
     throw new Error(`${name} must be a positive number`);
   }
   return value;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "localhost" || normalized === "::1";
 }
