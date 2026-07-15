@@ -16,7 +16,7 @@ const graphemeSegmenter = new Intl.Segmenter(undefined, {
 });
 const swiftWhitespace = /\p{White_Space}/u;
 const swiftWhitespaceEdges =
-  /^\p{White_Space}+|\p{White_Space}+$/gu;
+  /^[\p{White_Space}\u200B]+|[\p{White_Space}\u200B]+$/gu;
 
 export function assessTranscriptQuality(
   text: string,
