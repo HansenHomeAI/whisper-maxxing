@@ -213,6 +213,24 @@ and remains the author's daily driver until sign-off.
   loadable from its packaged `file://` location, including nested settings and capture
   pages. Browser E2E tests must consume the production Vite output rather than replacing
   this setting in a test-only build.
+- D14: Protocol E2E uses a dedicated Vitest config that includes only
+  `tests/e2e/protocol/**/*.spec.ts`. The default Vitest config continues excluding every
+  `e2e` tree so Playwright specs are never collected as unit tests, while the immutable
+  `e2e:protocol` command cannot silently report an empty suite.
+- D15: The production Vite multi-page build includes the overlay renderer when
+  `src/renderer/overlay/index.html` is present. Overlay E2E must load that production
+  artifact through the real `OverlayWindow` and control path; a test-only renderer or
+  direct render call is not UX proof.
+- D16: AudioWorklet frames transfer their `ArrayBuffer` ownership to the capture preload
+  with the DOM MessagePort transfer list, and the preload forwards the frame to Electron
+  main by value. Electron 43's cross-process MessagePort bridge only accepts ports in its
+  transfer list; attempting to transfer an `ArrayBuffer` there hangs the pinned runtime.
+  Capture E2E therefore proves actual worklet-sender detachment plus intact PCM receipt in
+  main, without a synthetic local `structuredClone` detachment.
+- D17: Production compilation is explicit and cross-platform: Vite builds all renderer
+  pages, `tsc -p tsconfig.build.json` emits core/main ESM under `dist-electron`, and a
+  dedicated Vite library build emits the sandboxed settings preload as CommonJS beside the
+  compiled settings controller. Packaging consumes only those production outputs.
 
 ## Pathfinder findings
 

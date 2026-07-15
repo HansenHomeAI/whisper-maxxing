@@ -66,3 +66,12 @@ The core agent may APPEND clarifying rules under "Amendments" below; amendments 
   launch handshake can hang before it attaches. Start readiness work from an explicit async
   function without top-level await, surface its rejection to the artifact/test channel, and
   close the Electron application in test cleanup.
+- A3 (detached async error recurrence): Every timer, event callback, and fire-and-forget
+  operation must terminate in an explicit rejection reporter. When the invoked function can
+  throw synchronously, begin with `Promise.resolve().then(() => operation())` before
+  `.catch(report)`; wrapping an already-invoked expression does not adopt a synchronous
+  throw and is not an error boundary.
+- A4 (stale async state recurrence): An epoch or generation guard must be rechecked after
+  every awaited operation before a background response mutates controller state. A check
+  made only before an awaited renderer, socket, or alert call does not prevent an older
+  task from overwriting a newer user action.
