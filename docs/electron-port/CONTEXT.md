@@ -240,6 +240,18 @@ and remains the author's daily driver until sign-off.
   npm's `npm_node_execpath`, and only then `process.execPath`. Electron's `process.execPath`
   is the app executable rather than Node, so this explicit runner keeps the same real child
   process and HTTP behavior on macOS and Windows without adding a test-only transport.
+- D20: Application startup always resolves configuration through the first-run service,
+  including explicit `WD_CONFIG` paths, then applies the config's launch-at-login setting.
+  A newly created macOS config opens the native Microphone and Accessibility privacy panes
+  through their direct System Settings links before capture starts.
+- D21: The primary Electron CI matrix is the cross-platform acceptance surface, not a
+  unit-only smoke job. Both macOS and Windows run every TypeScript suite, renderer E2E,
+  black-box protocol suite, and 50-cycle soak; the Windows leg also executes the Pester
+  bootstrap contract. Packaging remains a separate two-OS artifact matrix.
+- D22: `WD_HEADLESS=1` is an isolated verification runtime and never mutates the operating
+  system's login-item registration. The managed protocol config also sets
+  `launchAtLogin:false` defensively; normal application launches still apply the user's
+  configured launch-at-login preference.
 
 ## Pathfinder findings
 
