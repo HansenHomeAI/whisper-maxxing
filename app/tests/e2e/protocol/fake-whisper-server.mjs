@@ -2,6 +2,10 @@ import { createServer } from "node:http";
 
 const port = argumentNumber("--port");
 const host = argumentValue("--host") ?? "127.0.0.1";
+const transcriptNonce = process.env.WD_E2E_TRANSCRIPT_NONCE;
+if (!transcriptNonce) {
+  throw new Error("WD_E2E_TRANSCRIPT_NONCE is required");
+}
 let inferenceCount = 0;
 
 const server = createServer(async (request, response) => {
@@ -12,7 +16,7 @@ const server = createServer(async (request, response) => {
     inferenceCount += 1;
     response.writeHead(200, { "content-type": "application/json" });
     response.end(
-      JSON.stringify({ text: `electron fake transcript ${inferenceCount}` }),
+      JSON.stringify({ text: `electron-${transcriptNonce}-${inferenceCount}` }),
     );
     return;
   }

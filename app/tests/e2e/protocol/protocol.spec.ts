@@ -21,6 +21,7 @@ const target = targetFromEnvironment();
 const ownedSessionIds = new Set<string>();
 let retryableResult: SessionResult;
 let managedElectron: ManagedElectronTarget | null = null;
+const fakeServerSessions = new Set<string>();
 
 describe.sequential(`control protocol against ${target.target}`, () => {
   beforeAll(async () => {
@@ -33,6 +34,9 @@ describe.sequential(`control protocol against ${target.target}`, () => {
   afterAll(async () => {
     try {
       await drainOwnedSessions(target, ownedSessionIds);
+      if (managedElectron !== null) {
+        expect(fakeServerSessions.size).toBeGreaterThan(0);
+      }
     } finally {
       await managedElectron?.stop();
     }
@@ -131,8 +135,10 @@ describe.sequential(`control protocol against ${target.target}`, () => {
 
   test("unknown targeted read neither returns nor discards a result", async () => {
     const sessionId = await recordSession(false);
+    const barrierSessionId = await recordSession(false);
+    const barrierResult = await waitForResult(target, barrierSessionId);
+    assertResultContract(barrierResult, barrierSessionId);
     const unknownSessionId = `unknown-${randomUUID()}`;
-    await sleep(target.target === "swift" ? 2_000 : 750);
     const unknown = await sendControl(target, "nextResult", unknownSessionId);
     expect(unknown.ok).toBe(true);
     expect(unknown.resultAvailable).toBe(false);
@@ -206,6 +212,20 @@ function assertResultContract(result: SessionResult, sessionId: string): void {
   expect(result.metrics.captureCoverageRatio).toBeLessThanOrEqual(1.01);
   expect(result.metrics.transcriptionMode).toEqual(expect.any(String));
   expect(result.metrics.completedAtISO8601).toEqual(expect.any(String));
+  if (managedElectron !== null) {
+    expect(result.errorMessage ?? undefined).toBeUndefined();
+    if (result.metrics.transcriptionMode === "server") {
+      expect(result.text).toMatch(
+        new RegExp(`^electron-${managedElectron.transcriptNonce}-\\d+$`),
+      );
+      fakeServerSessions.add(sessionId);
+    } else {
+      expect(["silent-capture", "robust-silent-capture"]).toContain(
+        result.metrics.transcriptionMode,
+      );
+      expect(result.text).toBe("");
+    }
+  }
 }
 
 function expectOptionalType(value: unknown, expectedType: "string" | "number"): void {

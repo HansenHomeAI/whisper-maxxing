@@ -1,4 +1,5 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { appendFileSync, openSync, closeSync } from "node:fs";
@@ -12,6 +13,7 @@ import {
 } from "./controlClient.js";
 
 export interface ManagedElectronTarget {
+  transcriptNonce: string;
   stop(): Promise<void>;
 }
 
@@ -25,6 +27,7 @@ export async function startManagedElectronTarget(
     return null;
   }
   const appRoot = path.resolve(import.meta.dirname, "../../..");
+  const transcriptNonce = randomUUID();
   buildProductionApp(appRoot);
   const root = await mkdtemp(path.join(os.tmpdir(), "whisper-electron-e2e-"));
   const tempDirectory = path.join(root, "captures");
@@ -77,6 +80,7 @@ export async function startManagedElectronTarget(
         whisperThreads: 2,
         persistRecentCaptures: false,
         persistHistory: false,
+        launchAtLogin: false,
         serverRequestTimeoutSeconds: 5,
         robustServerRequestTimeoutSeconds: 5,
         cliTimeoutSeconds: 5,
@@ -114,6 +118,7 @@ export async function startManagedElectronTarget(
       WD_CONFIG: configPath,
       WD_HEADLESS: "1",
       WD_NODE_BINARY: process.execPath,
+      WD_E2E_TRANSCRIPT_NONCE: transcriptNonce,
     },
     stdio: ["ignore", logFd, logFd],
     windowsHide: true,
@@ -135,6 +140,7 @@ export async function startManagedElectronTarget(
   }
 
   return {
+    transcriptNonce,
     async stop() {
       if (stopped) {
         return;
