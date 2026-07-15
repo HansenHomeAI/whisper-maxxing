@@ -1,11 +1,38 @@
-appId: ai.hansenhome.whisperdictation
-productName: WhisperDictation
+appId: com.hansenhomeai.whisper-maxxing
+productName: Whisper Maxxing
+asar: true
 directories:
   output: release
 files:
   - dist-electron/**
   - dist-renderer/**
+  - package.json
+extraResources:
+  - from: bin/wdctl.mjs
+    to: bin/wdctl.mjs
+artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 mac:
-  target: zip
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  icon: build/icon.icns
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    NSMicrophoneUsageDescription: Whisper Maxxing uses the microphone only while capturing local dictation.
+  target:
+    - dmg
+    - zip
+dmg:
+  sign: false
+  writeUpdateInfo: false
 win:
-  target: zip
+  icon: build/icon.ico
+  target: nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  perMachine: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Whisper Maxxing

@@ -35,3 +35,32 @@ jobs:
         run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
       - run: swift build
       - run: swift run transcript-quality-tests
+
+  dist:
+    name: Dist (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2022]
+    defaults:
+      run:
+        working-directory: app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+      - run: npm run dist
+      - run: node tests/dist-smoke/check-artifacts.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: whisper-maxxing-${{ matrix.os }}
+          path: |
+            app/release/*.dmg
+            app/release/*.zip
+            app/release/*.exe
+          if-no-files-found: error
