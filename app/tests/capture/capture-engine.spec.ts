@@ -1,0 +1,220 @@
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+
+import {
+  CaptureEngine,
+  CaptureEngineError,
+} from "../../src/main/capture/captureEngine.js";
+import {
+  FakeCaptureClock,
+  FakeCaptureSource,
+  parseMonoPcm16Wav,
+} from "../fakes/fake-capture-source.js";
+
+const fixturePath = fileURLToPath(
+  new URL("../fixtures/audio/prebuffer-marker.wav", import.meta.url),
+);
+
+describe("CaptureEngine", () => {
+  let directory: string;
+  let clock: FakeCaptureClock;
+  let source: FakeCaptureSource;
+  let engine: CaptureEngine;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), "whisper-capture-test-"));
+    clock = new FakeCaptureClock();
+    source = new FakeCaptureSource({
+      wavPath: fixturePath,
+      clock,
+      frameSamples: 1_600,
+    });
+    engine = createEngine(source, clock, directory);
+  });
+
+  afterEach(async () => {
+    await engine.dispose();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  it("prepends the exact rolling prebuffer bytes to the capture", async () => {
+    await startEngineAndFeedFrames(engine, source, clock, 10);
+    const fixture = parseMonoPcm16Wav(await readFile(fixturePath));
+    const started = engine.startSession("fast");
+    expect(started.prebufferMilliseconds).toBe(1_000);
+
+    feedFrames(source, clock, 5);
+    const capture = await engine.stopSession(false);
+    expect(capture).not.toBeNull();
+    const output = parseMonoPcm16Wav(await readFile(capture!.wavPath));
+
+    expect(Array.from(output.samples.subarray(0, 16_000))).toEqual(
+      Array.from(fixture.samples.subarray(0, 16_000)),
+    );
+    expect(Array.from(output.samples.subarray(8_000, 16_000))).toEqual(
+      Array.from(fixture.samples.subarray(8_000, 16_000)),
+    );
+    expect(output.samples.some((sample) => sample !== 0)).toBe(true);
+  });
+
+  it("returns exact duration and coverage metrics", async () => {
+    await startEngineAndFeedFrames(engine, source, clock, 10);
+    engine.startSession("robust");
+    feedFrames(source, clock, 5);
+
+    const capture = await engine.stopSession(false);
+    expect(capture).toMatchObject({
+      transcriptionProfile: "robust",
+      prebufferMilliseconds: 1_000,
+      sampleCount: 24_000,
+      audioDurationMilliseconds: 1_500,
+      wallClockMilliseconds: 500,
+      activeAudioMilliseconds: 500,
+      droppedMilliseconds: 0,
+    });
+    expect(capture!.signalMetrics.probablySilent).toBe(false);
+  });
+
+  it("discards without creating a WAV file", async () => {
+    await startEngineAndFeedFrames(engine, source, clock, 1);
+    engine.startSession("fast");
+    feedFrames(source, clock, 1);
+
+    await expect(engine.stopSession(true)).resolves.toBeNull();
+    expect(await readdir(directory)).toEqual([]);
+    expect(engine.isRecording()).toBe(false);
+  });
+
+  it("writes a valid 16 kHz mono s16le WAV header and PCM body", async () => {
+    await startEngineAndFeedFrames(engine, source, clock, 1);
+    engine.startSession("fast");
+    feedFrames(source, clock, 1);
+    const capture = await engine.stopSession(false);
+    const wav = await readFile(capture!.wavPath);
+    const view = new DataView(wav.buffer, wav.byteOffset, wav.byteLength);
+
+    expect(wav.subarray(0, 4).toString()).toBe("RIFF");
+    expect(wav.subarray(8, 12).toString()).toBe("WAVE");
+    expect(wav.subarray(12, 16).toString()).toBe("fmt ");
+    expect(view.getUint16(20, true)).toBe(1);
+    expect(view.getUint16(22, true)).toBe(1);
+    expect(view.getUint32(24, true)).toBe(16_000);
+    expect(view.getUint32(28, true)).toBe(32_000);
+    expect(view.getUint16(32, true)).toBe(2);
+    expect(view.getUint16(34, true)).toBe(16);
+    expect(wav.subarray(36, 40).toString()).toBe("data");
+    expect(view.getUint32(40, true)).toBe(wav.byteLength - 44);
+    expect(parseMonoPcm16Wav(wav).samples.length).toBe(3_200);
+  });
+
+  it("detects a stale feed and escalates after three restart failures", async () => {
+    const restartActions: string[] = [];
+    engine = createEngine(source, clock, directory, () => {
+      restartActions.push("restartProcess");
+    });
+    await startEngineAndFeedFrames(engine, source, clock, 1);
+    source.queueStartFailures(
+      new Error("restart one failed"),
+      new Error("restart two failed"),
+      new Error("restart three failed"),
+    );
+    clock.advance(2_001);
+
+    expect(engine.readinessAssessment()).toEqual({
+      ready: false,
+      reason: "capture-buffer-stale",
+      secondsSinceLastBuffer: 2.101,
+    });
+    await engine.waitForRecoveryIdle();
+
+    expect(source.startCallCount).toBe(4);
+    expect(restartActions).toEqual(["restartProcess"]);
+    expect(engine.readinessAssessment().ready).toBe(false);
+  });
+
+  it("surfaces enforced preferred-device failures as not ready", async () => {
+    engine = new CaptureEngine({
+      source,
+      config: {
+        prebufferMilliseconds: 1_000,
+        preferredInputDevice: "Missing Microphone",
+        enforcePreferredInputDevice: true,
+        tempDirectory: directory,
+      },
+      clock,
+      startupTimeoutMilliseconds: 50,
+    });
+
+    await expect(engine.startAsync()).rejects.toThrow(
+      "Preferred audio input device not found: Missing Microphone",
+    );
+    expect(engine.readinessAssessment()).toMatchObject({
+      ready: false,
+      reason: "capture-engine-stopped",
+    });
+  });
+
+  it("rejects duplicate starts and stop without a session", async () => {
+    await startEngineAndFeedFrames(engine, source, clock, 1);
+    engine.startSession("fast");
+    expect(() => engine.startSession("robust")).toThrowError(
+      new CaptureEngineError(
+        "already-recording",
+        "A recording is already active.",
+      ),
+    );
+    await engine.stopSession(true);
+    await expect(engine.stopSession(false)).rejects.toThrow(
+      "There is no active recording session.",
+    );
+  });
+});
+
+function createEngine(
+  source: FakeCaptureSource,
+  clock: FakeCaptureClock,
+  directory: string,
+  restartProcess: () => void = () => undefined,
+): CaptureEngine {
+  return new CaptureEngine({
+    source,
+    config: {
+      prebufferMilliseconds: 1_000,
+      preferredInputDevice: null,
+      enforcePreferredInputDevice: false,
+      tempDirectory: directory,
+    },
+    clock,
+    restartProcess,
+    delay: async () => undefined,
+    startupTimeoutMilliseconds: 100,
+    restartRetryDelayMilliseconds: 0,
+    createSessionId: () => "00000000-0000-0000-0000-000000000001",
+  });
+}
+
+async function startEngineAndFeedFrames(
+  engine: CaptureEngine,
+  source: FakeCaptureSource,
+  clock: FakeCaptureClock,
+  frameCount: number,
+): Promise<void> {
+  const startup = engine.startAsync();
+  feedFrames(source, clock, frameCount);
+  await startup;
+}
+
+function feedFrames(
+  source: FakeCaptureSource,
+  clock: FakeCaptureClock,
+  count: number,
+): void {
+  for (let index = 0; index < count; index += 1) {
+    source.emitNextFrame();
+    clock.advance(100);
+  }
+}
