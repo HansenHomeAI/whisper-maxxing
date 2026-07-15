@@ -11,6 +11,7 @@ const candidateInputs = {
   main: path.join(rendererRoot, "index.html"),
   settings: path.join(rendererRoot, "settings", "index.html"),
   capture: path.join(rendererRoot, "capture", "capture.html"),
+  overlay: path.join(rendererRoot, "overlay", "index.html"),
 };
 const rendererInputs = Object.fromEntries(
   Object.entries(candidateInputs).filter(([, input]) => existsSync(input)),
