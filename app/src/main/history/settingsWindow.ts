@@ -39,13 +39,13 @@ export class SettingsWindowController {
     }
 
     const window = new BrowserWindow({
-      width: 760,
-      height: 680,
-      minWidth: 560,
-      minHeight: 480,
+      width: 600,
+      height: 480,
+      minWidth: 460,
+      minHeight: 400,
       show: false,
       title: "WhisperDictation Settings",
-      backgroundColor: "#111113",
+      backgroundColor: "#000000",
       webPreferences: {
         contextIsolation: true,
         nodeIntegration: false,

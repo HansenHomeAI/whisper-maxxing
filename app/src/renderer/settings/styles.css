@@ -1,9 +1,10 @@
 :root {
-  color: #f7f7f8;
-  background: #111113;
+  color: #f5f5f5;
+  background: #000;
   font-family:
-    Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", Inter, "Segoe UI", sans-serif;
   font-synthesis: none;
+  color-scheme: dark;
 }
 
 * {
@@ -11,18 +12,18 @@
 }
 
 body {
-  min-width: 520px;
+  min-width: 440px;
   min-height: 100vh;
   margin: 0;
   background:
-    radial-gradient(circle at 15% 0%, rgb(75 75 82 / 18%), transparent 35%),
-    #111113;
+    radial-gradient(circle at 50% -20%, rgb(255 255 255 / 8%), transparent 44%),
+    #000;
 }
 
 main {
-  width: min(100%, 860px);
+  width: min(100%, 680px);
   margin: 0 auto;
-  padding: 34px;
+  padding: 22px 24px 18px;
 }
 
 header,
@@ -36,11 +37,11 @@ header,
 header,
 .section-heading {
   justify-content: space-between;
-  gap: 20px;
+  gap: 14px;
 }
 
 header {
-  margin-bottom: 34px;
+  margin-bottom: 20px;
 }
 
 h1,
@@ -51,142 +52,214 @@ p {
 
 h1 {
   margin-bottom: 0;
-  font-size: 25px;
-  letter-spacing: -0.03em;
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.025em;
 }
 
 h2 {
   margin-bottom: 0;
-  font-size: 15px;
-  font-weight: 650;
+  color: #8a8a8f;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
 }
 
 .eyebrow {
-  margin-bottom: 5px;
-  color: #a8a8af;
-  font-size: 11px;
+  margin-bottom: 3px;
+  color: #666;
+  font-size: 9px;
   font-weight: 700;
-  letter-spacing: 0.12em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
 }
 
 button,
 input {
-  border: 1px solid #35353a;
-  border-radius: 10px;
+  border: 1px solid rgb(255 255 255 / 10%);
+  border-radius: 8px;
   color: inherit;
-  background: #1b1b1e;
+  background: rgb(255 255 255 / 5%);
   font: inherit;
+  transition:
+    border-color 120ms ease,
+    background 120ms ease;
 }
 
 button {
-  padding: 8px 11px;
+  min-height: 28px;
+  padding: 5px 9px;
   cursor: pointer;
+  font-size: 11px;
 }
 
 button:hover,
 button:focus-visible,
 input:focus-visible {
-  border-color: #6d6d76;
+  border-color: rgb(255 255 255 / 28%);
+  background: rgb(255 255 255 / 8%);
   outline: none;
 }
 
 button.danger {
-  color: #ffb1b1;
+  color: #9a9a9f;
+}
+
+button.danger:hover,
+button.danger:focus-visible {
+  color: #ff9b9b;
 }
 
 input[type="search"] {
-  width: 225px;
-  padding: 9px 12px;
+  width: 190px;
+  height: 30px;
+  padding: 5px 9px;
+  font-size: 11px;
+}
+
+input[type="search"]::placeholder {
+  color: #666;
 }
 
 #history-list {
-  display: grid;
-  gap: 10px;
-  margin: 16px 0 0;
+  margin: 10px 0 0;
   padding: 0;
+  overflow: hidden;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 10px;
+  background: rgb(10 10 10 / 74%);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
+  backdrop-filter: blur(20px) saturate(115%);
   list-style: none;
 }
 
+#history-list:empty {
+  display: none;
+}
+
 .history-entry {
-  padding: 15px 16px;
-  border: 1px solid #2d2d31;
-  border-radius: 14px;
-  background: rgb(28 28 31 / 88%);
+  padding: 10px 11px 9px;
+  border-bottom: 1px solid rgb(255 255 255 / 8%);
+  background: transparent;
+}
+
+.history-entry:last-child {
+  border-bottom: 0;
+}
+
+.history-entry:hover {
+  background: rgb(255 255 255 / 2.5%);
 }
 
 .entry-text {
-  margin-bottom: 12px;
-  color: #fff;
-  line-height: 1.45;
+  margin-bottom: 7px;
+  color: #f2f2f2;
+  font-size: 13px;
+  line-height: 1.38;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
 }
 
 .entry-meta {
   justify-content: space-between;
-  gap: 12px;
-  color: #a9a9b1;
-  font-size: 12px;
+  gap: 8px;
+  color: #666;
+  font-size: 10px;
 }
 
 .entry-actions {
-  gap: 8px;
+  gap: 6px;
 }
 
 .profile {
-  padding: 3px 7px;
+  padding: 2px 6px;
+  border: 1px solid rgb(255 255 255 / 8%);
   border-radius: 999px;
-  color: #ededf0;
-  background: #39393f;
-  font-size: 10px;
+  color: #8d8d92;
+  background: rgb(255 255 255 / 4%);
+  font-size: 8px;
   font-weight: 700;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .copy-button {
-  padding: 5px 9px;
-  font-size: 12px;
+  min-height: 22px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  color: #aaa;
+  font-size: 10px;
 }
 
 .empty,
 .error {
-  margin: 20px 0;
-  padding: 14px;
-  border-radius: 12px;
-  color: #a9a9b1;
+  margin: 10px 0 0;
+  padding: 18px 12px;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 10px;
+  color: #666;
   text-align: center;
-  background: #19191c;
+  background: rgb(10 10 10 / 74%);
+  font-size: 11px;
 }
 
 .error {
-  color: #ffb1b1;
+  color: #ff9b9b;
 }
 
 details {
-  margin-top: 30px;
-  border-top: 1px solid #29292d;
-  color: #b6b6bd;
+  margin-top: 16px;
+  border-top: 1px solid rgb(255 255 255 / 8%);
+  color: #777;
 }
 
 summary {
-  padding: 18px 0;
+  padding: 12px 0 6px;
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 650;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 pre {
-  max-height: 300px;
-  margin: 0;
-  padding: 14px;
+  max-height: 220px;
+  margin: 6px 0 0;
+  padding: 10px;
   overflow: auto;
-  border-radius: 12px;
-  color: #d7d7db;
-  background: #09090a;
-  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  border: 1px solid rgb(255 255 255 / 8%);
+  border-radius: 8px;
+  color: #a7a7ab;
+  background: rgb(8 8 8 / 90%);
+  font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap;
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: #333;
+  background-clip: padding-box;
+}
+
+@media (max-width: 540px) {
+  main {
+    padding-inline: 16px;
+  }
+
+  header,
+  .section-heading {
+    gap: 10px;
+  }
+
+  input[type="search"] {
+    width: 160px;
+  }
 }
 
 .sr-only {
