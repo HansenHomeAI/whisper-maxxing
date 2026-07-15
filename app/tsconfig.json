@@ -20,6 +20,7 @@
     "src/**/*.ts",
     "tests/**/*.ts",
     "vite.config.ts",
+    "vite.preload.config.ts",
     "vitest.config.ts",
     "vitest.protocol.config.ts",
     "playwright.config.ts"
