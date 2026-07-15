@@ -5,14 +5,19 @@ import { app } from "electron";
 
 import { JSONSocketServer } from "../../../src/core/jsonSocket.js";
 import type { ControlRequest } from "../../../src/core/controlProtocol.js";
-import { HistoryStore } from "../../../src/main/history/historyStore.js";
-import { SettingsWindowController } from "../../../src/main/history/settingsWindow.js";
+import {
+  registerSettingsHistory,
+  type OpenSettingsHandler,
+} from "../../../src/main/history/registration.js";
+import { createTray } from "../../../src/main/tray.js";
 
 const configPath = requireEnvironment("WD_E2E_CONFIG");
 const rendererUrl = requireEnvironment("WD_E2E_RENDERER_URL");
 const preloadPath = requireEnvironment("WD_E2E_PRELOAD_PATH");
 const readyPath = requireEnvironment("WD_E2E_READY_PATH");
 const errorPath = requireEnvironment("WD_E2E_ERROR_PATH");
+const recordedPath = requireEnvironment("WD_E2E_RECORDED_PATH");
+const recordedNonce = requireEnvironment("WD_E2E_RECORDED_NONCE");
 const userDataPath = path.dirname(configPath);
 
 app.setPath("userData", userDataPath);
@@ -25,35 +30,52 @@ async function start(): Promise<void> {
       unknown
     >;
     await app.whenReady();
-    const historyStore = new HistoryStore({ userDataPath });
-    const settingsWindow = new SettingsWindowController({
-      historyStore,
+    const handlers = new Map<string, OpenSettingsHandler>();
+    const registration = registerSettingsHistory({
+      userDataPath,
       activeConfig: config,
       rendererUrl,
       preloadPath,
+      persistHistory: config.persistHistory !== false,
+      registerControlHandler(command, handler) {
+        handlers.set(command, handler);
+        return () => handlers.delete(command);
+      },
     });
+    const tray = createTray({
+      openSettings: async () => {
+        await requireHandler(handlers, "openSettings")({ command: "openSettings" });
+      },
+      onError: reportError,
+    });
+    let recordingScheduled = false;
     const server = new JSONSocketServer(
       requireString(config, "controlHost"),
       requireNumber(config, "controlPort"),
       async (request: ControlRequest) => {
         if (request.command === "openSettings") {
-          await settingsWindow.open();
-          return { ok: true };
+          const response = await requireHandler(handlers, "openSettings")(request);
+          if (!recordingScheduled) {
+            recordingScheduled = true;
+            setTimeout(() => {
+              void recordResult(registration, recordedNonce, recordedPath);
+            }, 100);
+          }
+          return response;
         }
         if (request.command === "status") {
           return { ok: true };
         }
         return { ok: false, error: `Unsupported E2E command: ${request.command}` };
       },
-      (error) => {
-        void writeFile(errorPath, error.stack ?? error.message);
-      },
+      reportError,
     );
     await server.start();
     await writeFile(readyPath, "ready", "utf8");
 
     app.on("before-quit", () => {
-      settingsWindow.dispose();
+      registration.dispose();
+      tray.destroy();
       void server.stop();
     });
   } catch (error) {
@@ -63,6 +85,51 @@ async function start(): Promise<void> {
       "utf8",
     );
     app.exit(1);
+  }
+
+  function reportError(error: Error): void {
+    void writeFile(errorPath, error.stack ?? error.message);
+  }
+}
+
+function requireHandler(
+  handlers: ReadonlyMap<string, OpenSettingsHandler>,
+  command: "openSettings",
+): OpenSettingsHandler {
+  const handler = handlers.get(command);
+  if (handler === undefined) {
+    throw new Error(`No settings handler registered for ${command}.`);
+  }
+  return handler;
+}
+
+async function recordResult(
+  registration: ReturnType<typeof registerSettingsHistory>,
+  text: string,
+  markerPath: string,
+): Promise<void> {
+  const sessionId = "recorded-after-open";
+  try {
+    await registration.recordSuccessfulResult({
+      sessionId,
+      text,
+      metrics: {
+        sessionId,
+        transcriptionProfile: "robust",
+        prebufferMilliseconds: 1_000,
+        audioDurationMilliseconds: 3_300,
+        transcriptionMilliseconds: 190,
+        transcriptionMode: "server",
+        completedAtISO8601: new Date().toISOString(),
+      },
+    });
+    await writeFile(markerPath, "recorded", "utf8");
+  } catch (error) {
+    await writeFile(
+      errorPath,
+      error instanceof Error ? (error.stack ?? error.message) : String(error),
+      "utf8",
+    );
   }
 }
 

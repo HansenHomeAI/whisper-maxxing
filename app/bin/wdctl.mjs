@@ -91,11 +91,7 @@ async function ensureDaemon(command, config, configPath) {
   }
 
   const coldStart = performance.now();
-  const child = spawn(config.daemonBinaryPath, ["--config", configPath], {
-    detached: true,
-    stdio: "ignore",
-    windowsHide: true,
-  });
+  const child = await spawnDaemon(config.daemonBinaryPath, configPath);
   child.unref();
 
   const deadline = Date.now() + 15_000;
@@ -106,6 +102,26 @@ async function ensureDaemon(command, config, configPath) {
     await delay(10);
   }
   throw new Error("The dictation daemon did not start in time.");
+}
+
+function spawnDaemon(binaryPath, configPath) {
+  return new Promise((resolve, reject) => {
+    let child;
+    try {
+      child = spawn(binaryPath, ["--config", configPath], {
+        detached: true,
+        stdio: "ignore",
+        windowsHide: true,
+      });
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    child.once("spawn", () => resolve(child));
+    child.once("error", (error) => {
+      reject(new Error(`Unable to start the dictation daemon: ${error.message}`));
+    });
+  });
 }
 
 async function daemonIsReachable(config) {

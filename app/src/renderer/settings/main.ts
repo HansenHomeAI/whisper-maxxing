@@ -16,19 +16,30 @@ clearButton.addEventListener("click", () => {
   }
   void clearHistory();
 });
+window.settingsApi.onHistoryReload(() => {
+  void reloadHistory();
+});
 
 void loadSettings();
 
 async function loadSettings(): Promise<void> {
   try {
-    const [loadedEntries, config] = await Promise.all([
-      window.settingsApi.listHistory(),
+    const [config] = await Promise.all([
       window.settingsApi.getConfig(),
+      reloadHistory(),
     ]);
+    activeConfig.textContent = JSON.stringify(config, null, 2);
+  } catch (error) {
+    showError(error);
+  }
+}
+
+async function reloadHistory(): Promise<void> {
+  try {
+    const loadedEntries = await window.settingsApi.listHistory();
     entries = [...loadedEntries].sort(
       (left, right) => Date.parse(right.completedAt) - Date.parse(left.completedAt),
     );
-    activeConfig.textContent = JSON.stringify(config, null, 2);
     renderHistory();
   } catch (error) {
     showError(error);

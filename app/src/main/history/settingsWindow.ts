@@ -34,6 +34,7 @@ export class SettingsWindowController {
       }
       this.window.show();
       this.window.focus();
+      this.window.webContents.send("settings:history:reload");
       return;
     }
 

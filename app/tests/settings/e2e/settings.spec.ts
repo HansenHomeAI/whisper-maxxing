@@ -39,8 +39,10 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
   const historyPath = path.join(temporaryDirectory, "history.jsonl");
   const readyPath = path.join(temporaryDirectory, "ready");
   const errorPath = path.join(temporaryDirectory, "error.log");
+  const recordedPath = path.join(temporaryDirectory, "recorded");
   const firstNonce = `alpha-${randomUUID()}`;
   const secondNonce = `bravo-${randomUUID()}`;
+  const recordedNonce = `recorded-${randomUUID()}`;
   const older = historyEntry("older", firstNonce, "2026-07-14T14:00:00.000Z");
   const newer = historyEntry("newer", secondNonce, "2026-07-14T14:01:00.000Z");
 
@@ -70,6 +72,8 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
       WD_E2E_PRELOAD_PATH: artifacts.preloadPath,
       WD_E2E_READY_PATH: readyPath,
       WD_E2E_ERROR_PATH: errorPath,
+      WD_E2E_RECORDED_PATH: recordedPath,
+      WD_E2E_RECORDED_NONCE: recordedNonce,
     },
   });
   await waitForReady(readyPath, errorPath);
@@ -93,10 +97,18 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
     )
     .toBe(secondNonce);
 
+  await waitForReady(recordedPath, errorPath, "recorded");
+  await expect(readFile(historyPath, "utf8")).resolves.toContain(recordedNonce);
+  await expect(page.getByText(recordedNonce)).toHaveCount(0);
   await executeFile(process.execPath, [wdctlPath, "open-settings"], {
     env: { ...process.env, WDCTL_CONFIG: configPath },
   });
   expect(electronApplication.windows()).toHaveLength(1);
+  await expect(renderedEntries).toHaveText([
+    recordedNonce,
+    secondNonce,
+    firstNonce,
+  ]);
 
   await page.getByPlaceholder("Search history").fill(firstNonce.slice(0, 14));
   await expect(renderedEntries).toHaveText([firstNonce]);
@@ -105,7 +117,7 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
   await page.getByPlaceholder("Search history").fill("");
   page.once("dialog", (dialog) => dialog.dismiss());
   await page.getByRole("button", { name: "Clear History" }).click();
-  await expect(page.locator(".history-entry")).toHaveCount(2);
+  await expect(page.locator(".history-entry")).toHaveCount(3);
   await expect(readFile(historyPath, "utf8")).resolves.toContain(firstNonce);
 
   page.once("dialog", (dialog) => dialog.accept());
@@ -161,17 +173,28 @@ async function buildApplication(outputRoot: string): Promise<{
     base: "./",
     configFile: false,
     logLevel: "silent",
-    root: path.join(sourceRoot, "renderer", "settings"),
+    root: path.join(sourceRoot, "renderer"),
     build: {
       emptyOutDir: true,
       outDir: rendererOutput,
+      rollupOptions: {
+        input: {
+          main: path.join(sourceRoot, "renderer", "index.html"),
+          settings: path.join(
+            sourceRoot,
+            "renderer",
+            "settings",
+            "index.html",
+          ),
+        },
+      },
     },
   });
 
   return {
     mainPath: path.join(mainOutput, "electronMain.mjs"),
     preloadPath: path.join(preloadOutput, "settingsPreload.cjs"),
-    rendererPath: path.join(rendererOutput, "index.html"),
+    rendererPath: path.join(rendererOutput, "settings", "index.html"),
   };
 }
 
@@ -185,7 +208,11 @@ async function settingsPage(application: ElectronApplication): Promise<Page> {
   return page;
 }
 
-async function waitForReady(readyPath: string, errorPath: string): Promise<void> {
+async function waitForReady(
+  readyPath: string,
+  errorPath: string,
+  expected = "ready",
+): Promise<void> {
   await expect
     .poll(async () => {
       try {
@@ -201,7 +228,7 @@ async function waitForReady(readyPath: string, errorPath: string): Promise<void>
         }
       }
     })
-    .toBe("ready");
+    .toBe(expected);
 }
 
 async function findAvailablePort(): Promise<number> {
