@@ -55,3 +55,14 @@ The core agent may APPEND clarifying rules under "Amendments" below; amendments 
   an Amendment here rather than letting a third agent hit it.
 
 ## Amendments (core agent appends below; never edits above this line)
+
+- A1 (capture E2E timeout recurrence): Electron fake-microphone harnesses must set the
+  fake-device and fake-audio Chromium flags before app readiness, use an explicit renderer
+  readiness/artifact handshake, dispose the capture engine during `before-quit`, and close
+  Electron plus temporary files in `finally`. On macOS CI the dedicated test harness may use
+  `--no-sandbox`; production windows must retain their configured sandbox behavior.
+- A2 (Playwright Electron launch recurrence): Electron E2E main entrypoints must not block
+  module evaluation with top-level `await app.whenReady()`, because Playwright's Electron
+  launch handshake can hang before it attaches. Start readiness work from an explicit async
+  function without top-level await, surface its rejection to the artifact/test channel, and
+  close the Electron application in test cleanup.
