@@ -21,7 +21,7 @@
     "e2e:settings": "playwright test tests/settings/e2e",
     "e2e:protocol": "vitest run --config vitest.protocol.config.ts",
     "soak": "tsx tests/e2e/soak/run.ts",
-    "dist": "electron-builder"
+    "dist": "npm run build && electron-builder --publish never"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
