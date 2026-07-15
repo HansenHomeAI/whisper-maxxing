@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { mkdir, open } from "node:fs/promises";
+import type { FileHandle } from "node:fs/promises";
 import { dirname, extname } from "node:path";
 
 import type {
@@ -56,27 +57,45 @@ class NodeManagedProcess implements ManagedProcess {
   }
 }
 
+export interface NodeProcessSpawnerOptions {
+  openLog?: (path: string, flags: string) => Promise<FileHandle>;
+}
+
 export class NodeProcessSpawner implements ProcessSpawner {
+  constructor(private readonly options: NodeProcessSpawnerOptions = {}) {}
+
   async spawnServer(
     command: string,
     args: readonly string[],
     logPath: string,
   ): Promise<ManagedProcess> {
     await mkdir(dirname(logPath), { recursive: true });
-    const log = await open(logPath, "a");
-    const resolved = executable(command, args);
-    const child = spawn(resolved.command, resolved.args, {
-      stdio: ["ignore", log.fd, log.fd],
-      windowsHide: true,
-    });
-    await waitForSpawn(child);
-    if (child.exitCode !== null) {
+    const log = await (this.options.openLog ?? open)(logPath, "a");
+    try {
+      const resolved = executable(command, args);
+      const child = spawn(resolved.command, resolved.args, {
+        stdio: ["ignore", log.fd, log.fd],
+        windowsHide: true,
+      });
+      await waitForSpawn(child);
+      if (child.exitCode !== null) {
+        await log.close();
+      } else {
+        let logClosed = false;
+        const closeLog = (): void => {
+          if (!logClosed) {
+            logClosed = true;
+            void log.close();
+          }
+        };
+        child.once("exit", closeLog);
+        child.once("error", closeLog);
+      }
+      return new NodeManagedProcess(command, child);
+    } catch (error) {
       await log.close();
-    } else {
-      child.once("exit", () => void log.close());
-      child.once("error", () => void log.close());
+      throw error;
     }
-    return new NodeManagedProcess(command, child);
   }
 
   async run(
@@ -94,13 +113,26 @@ export class NodeProcessSpawner implements ProcessSpawner {
       let stdout = "";
       let stderr = "";
       let settled = false;
+      let timedOut = false;
+      let terminationTimeout: ReturnType<typeof setTimeout> | null = null;
       const timeout = setTimeout(() => {
         if (settled) {
           return;
         }
-        settled = true;
+        timedOut = true;
         child.kill("SIGKILL");
-        resolve({ exitCode: child.exitCode, stdout, stderr, timedOut: true });
+        terminationTimeout = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            resolve({
+              exitCode: child.exitCode,
+              stdout,
+              stderr,
+              timedOut: true,
+              terminationConfirmed: false,
+            });
+          }
+        }, 2_000);
       }, options.timeoutMilliseconds);
       child.stdout?.setEncoding("utf8");
       child.stderr?.setEncoding("utf8");
@@ -111,17 +143,29 @@ export class NodeProcessSpawner implements ProcessSpawner {
         stderr += chunk;
       });
       child.once("error", (error) => {
-        if (!settled) {
+        if (!settled && !timedOut) {
           settled = true;
           clearTimeout(timeout);
+          if (terminationTimeout !== null) {
+            clearTimeout(terminationTimeout);
+          }
           reject(error);
         }
       });
-      child.once("exit", (code) => {
+      child.once("close", (code) => {
         if (!settled) {
           settled = true;
           clearTimeout(timeout);
-          resolve({ exitCode: code, stdout, stderr, timedOut: false });
+          if (terminationTimeout !== null) {
+            clearTimeout(terminationTimeout);
+          }
+          resolve({
+            exitCode: code,
+            stdout,
+            stderr,
+            timedOut,
+            terminationConfirmed: true,
+          });
         }
       });
     });

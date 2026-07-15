@@ -49,6 +49,9 @@ if (
 }
 
 await writeFile(scenarioPath, `${JSON.stringify(remaining)}\n`, "utf8");
+if (process.env.FAKE_WHISPER_CLI_PID_FILE) {
+  await writeFile(process.env.FAKE_WHISPER_CLI_PID_FILE, `${process.pid}\n`, "utf8");
+}
 
 if (scenario.kind === "delay") {
   await new Promise((resolve) => setTimeout(resolve, scenario.milliseconds));

@@ -1,6 +1,6 @@
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +13,7 @@ import {
 } from "../../src/core/index.js";
 import {
   TranscriptionManager,
+  NodeProcessSpawner,
   type ListeningProcess,
   type ManagedProcess,
   type ProcessRunOptions,
@@ -63,6 +64,53 @@ describe("whisper-server lifecycle", () => {
     harness.manager.enqueue(capture("spawned-server"));
     await waitForResults(harness.results, 1);
     expect(harness.results[0]).toMatchObject({ text: nonce });
+
+    await server.close();
+    expect(harness.manager.currentServerState("fast")).toBe("ready");
+  });
+
+  it("closes the server log after every spawn failure", async () => {
+    const root = await mkdtemp(join(tmpdir(), "whisper-log-leak-"));
+    roots.push(root);
+    let opened = 0;
+    let closed = 0;
+    const spawner = new NodeProcessSpawner({
+      openLog: async (path, flags) => {
+        const handle = await open(path, flags);
+        opened += 1;
+        const close = handle.close.bind(handle);
+        handle.close = async () => {
+          closed += 1;
+          await close();
+        };
+        return handle;
+      },
+    });
+
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      await expect(
+        spawner.spawnServer(
+          join(root, `missing-server-${attempt}`),
+          [],
+          join(root, "server.log"),
+        ),
+      ).rejects.toBeInstanceOf(Error);
+    }
+
+    expect(opened).toBe(4);
+    expect(closed).toBe(4);
+  });
+
+  it("leaves state starting when process spawn fails", async () => {
+    const port = await reservePort();
+    const server = new FakeWhisperServer();
+    const spawner = new FailingLifecycleSpawner(server);
+    const harness = await lifecycleHarness(port, spawner);
+
+    await harness.manager.prewarmServerIfNeeded();
+
+    expect(harness.manager.currentServerState("fast")).toBe("starting");
+    expect(harness.reportedErrors[0]?.message).toContain("scripted spawn failure");
   });
 
   it("terminates an expected stale server before launch", async () => {
@@ -231,6 +279,12 @@ class LifecycleSpawner implements ProcessSpawner {
 
   processIsRunning(pid: number): boolean {
     return this.runningPids.has(pid);
+  }
+}
+
+class FailingLifecycleSpawner extends LifecycleSpawner {
+  override async spawnServer(): Promise<ManagedProcess> {
+    throw new Error("scripted spawn failure");
   }
 }
 

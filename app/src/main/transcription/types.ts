@@ -70,6 +70,7 @@ export interface ProcessRunResult {
   stdout: string;
   stderr: string;
   timedOut: boolean;
+  terminationConfirmed?: boolean;
 }
 
 export interface ListeningProcess {

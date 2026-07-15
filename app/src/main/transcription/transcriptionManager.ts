@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { constants as fileConstants } from "node:fs";
 import {
+  access,
   mkdir,
-  readFile,
   readdir,
   rm,
   stat,
@@ -185,17 +186,7 @@ export class TranscriptionManager {
   }
 
   currentServerState(profile: TranscriptionProfile): ServerState {
-    const state = this.serverStates.get(profile) ?? "stopped";
-    const process = this.serverProcesses.get(profile);
-    if (
-      process !== undefined &&
-      !process.isRunning() &&
-      (state === "starting" || state === "ready")
-    ) {
-      this.serverStates.set(profile, "stopped");
-      return "stopped";
-    }
-    return state;
+    return this.serverStates.get(profile) ?? "stopped";
   }
 
   async prewarmServerIfNeeded(): Promise<void> {
@@ -216,7 +207,6 @@ export class TranscriptionManager {
       try {
         await this.ensureServerReady(server, this.startupTimeoutSeconds(server));
       } catch (error) {
-        this.serverStates.set(profile, "stopped");
         this.report(error);
       }
     }
@@ -727,7 +717,6 @@ export class TranscriptionManager {
       }
       await this.clock.sleep(100);
     }
-    this.serverStates.set(server.profile, "stopped");
     throw new TranscriptionError(
       `${server.profile} whisper-server did not become ready`,
     );
@@ -763,7 +752,6 @@ export class TranscriptionManager {
         throw new TranscriptionError("The transcription manager is stopped.");
       }
     } catch (error) {
-      this.serverStates.set(server.profile, "stopped");
       throw error;
     }
   }
@@ -892,7 +880,6 @@ export class TranscriptionManager {
       try {
         return await this.transcribeViaServer(retryServer, pending);
       } catch (error) {
-        this.serverStates.set(server.profile, "stopped");
         throw error;
       }
     }
@@ -949,6 +936,7 @@ export class TranscriptionManager {
         : this.config.cliTimeoutSeconds;
     await mkdir(this.paths.tempDirectory, { recursive: true });
     await writeFile(pending.wavPath, pending.wavData);
+    let canRemoveWav = true;
     try {
       const args = [
         "-m",
@@ -985,6 +973,12 @@ export class TranscriptionManager {
         },
       );
       if (result.timedOut) {
+        if (result.terminationConfirmed === false) {
+          canRemoveWav = false;
+          throw new TranscriptionError(
+            `whisper-cli timed out after ${Math.trunc(timeoutSeconds)} seconds and could not be terminated; WAV retained at ${pending.wavPath}`,
+          );
+        }
         throw TranscriptionError.cliTimeout(timeoutSeconds);
       }
       if (result.exitCode !== 0) {
@@ -997,9 +991,11 @@ export class TranscriptionManager {
       }
       return normalizeTranscript(result.stdout);
     } finally {
-      await rm(pending.wavPath, { force: true }).catch((error: unknown) =>
-        this.report(error),
-      );
+      if (canRemoveWav) {
+        await rm(pending.wavPath, { force: true }).catch((error: unknown) =>
+          this.report(error),
+        );
+      }
     }
   }
 
@@ -1097,7 +1093,7 @@ export class TranscriptionManager {
       return null;
     }
     try {
-      await readFile(configured);
+      await access(configured, fileConstants.R_OK);
       return configured;
     } catch {
       this.report(

@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,6 +42,8 @@ interface Harness {
   manager: TranscriptionManager;
   results: SessionResultPayload[];
   reportedErrors: Error[];
+  processSpawner: FakeServerProcessSpawner;
+  cliPidPath: string;
 }
 
 const servers: FakeWhisperServer[] = [];
@@ -105,7 +114,7 @@ describe("TranscriptionManager reliability ladder", () => {
       metrics: { transcriptionMode: "cli" },
     });
     expect(server.inferenceRequestCount).toBe(2);
-    expect(harness.manager.currentServerState("fast")).toBe("stopped");
+    expect(harness.manager.currentServerState("fast")).toBe("ready");
   });
 
   it("keeps the timeout active while reading a stalled response body", async () => {
@@ -215,6 +224,34 @@ describe("TranscriptionManager reliability ladder", () => {
     expect(result.errorMessage).toContain("whisper-cli timed out after 0 seconds");
     expect(result.metrics.transcriptionMode).toBe("failed");
     expect(result.salvagePath).toBeTypeOf("string");
+    const cliPid = Number(await readFile(harness.cliPidPath, "utf8"));
+    expect(processIsRunning(cliPid)).toBe(false);
+    await expect(
+      readFile(join(harness.root, "tmp", "cli-hang.wav")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("retains WAV when timed-out CLI termination is unconfirmed", async () => {
+    const server = await startServer(
+      { kind: "http-error", status: 500 },
+      { kind: "http-error", status: 500 },
+    );
+    const config = makeConfig(tmpdir(), server.port, {});
+    const orderingSpawner = new UnconfirmedTimeoutSpawner(config);
+    const harness = await createHarness(server, {}, [], {
+      processSpawner: orderingSpawner,
+    });
+
+    harness.manager.enqueue(capture("unconfirmed-cli"));
+    await waitForResults(harness.results, 1);
+
+    expect(orderingSpawner.wavExistedBeforeReturn).toBe(true);
+    const retained = join(harness.root, "tmp", "unconfirmed-cli.wav");
+    expect((await readFile(retained).then((data) => data.subarray(0, 4).toString("ascii"))))
+      .toBe("RIFF");
+    expect(harness.results[0]?.errorMessage).toContain(
+      "could not be terminated; WAV retained",
+    );
   });
 
   it("uses the quality-gated CLI second pass result", async () => {
@@ -336,6 +373,55 @@ describe("TranscriptionManager reliability ladder", () => {
       },
     });
     expect(robustServer.inferenceRequestCount).toBe(1);
+    expect(harness.processSpawner.spawns).toEqual([
+      { port: fastServer.port, modelPath: "/models/fast.bin" },
+      { port: robustServer.port, modelPath: "/models/robust.bin" },
+    ]);
+  });
+
+  it("uses the robust model for robust CLI fallback", async () => {
+    const fastServer = await startServer({
+      kind: "transcript",
+      text: `fast-${crypto.randomUUID()}`,
+    });
+    const robustServer = await startServer(
+      { kind: "http-error", status: 500 },
+      { kind: "http-error", status: 500 },
+    );
+    const robustNonce = `robust-cli-${crypto.randomUUID()}`;
+    const harness = await createHarness(
+      fastServer,
+      {
+        robustWhisperServerPort: robustServer.port,
+        whisperRobustModelPath: "/models/robust.bin",
+      },
+      [
+        {
+          kind: "transcript",
+          text: robustNonce,
+          expectedModel: "/models/robust.bin",
+        },
+      ],
+    );
+
+    harness.manager.enqueue(capture("robust-cli-source"));
+    await waitForResults(harness.results, 1);
+    const retryId = harness.manager.enqueueRobustRetry();
+    await waitForResults(harness.results, 2);
+
+    expect(harness.results[1]).toMatchObject({
+      sessionId: retryId,
+      text: robustNonce,
+      errorMessage: null,
+      metrics: {
+        transcriptionProfile: "robust",
+        transcriptionMode: "robust-cli",
+      },
+    });
+    expect(harness.processSpawner.spawns).toContainEqual({
+      port: robustServer.port,
+      modelPath: "/models/robust.bin",
+    });
   });
 
   it("reports an unconfigured robust model clearly", async () => {
@@ -539,6 +625,31 @@ describe("TranscriptionManager reliability ladder", () => {
       cleanedTranscript: nonce,
     });
   });
+
+  it("checks VAD readability without reading model contents", async () => {
+    const server = await startServer({
+      kind: "transcript",
+      text: `vad-${crypto.randomUUID()} ${"readability verified ".repeat(20)}`,
+    });
+    const root = await mkdtemp(join(tmpdir(), "whisper-vad-model-"));
+    roots.push(root);
+    const readableWithoutFileContents = join(root, "vad-model-directory");
+    await mkdir(readableWithoutFileContents);
+    const harness = await createHarness(server, {
+      whisperVADModelPath: readableWithoutFileContents,
+    });
+
+    harness.manager.enqueue(vadCapture("vad-readability"));
+    await waitForResults(harness.results, 1);
+
+    expect(harness.results[0]?.errorMessage).toBeNull();
+    const inference = server.requests.find(
+      (request) => request.url === "/inference",
+    );
+    const multipart = inference?.body.toString("latin1") ?? "";
+    expect(multipart).toContain('name="vad"');
+    expect(multipart).toContain('name="vad_min_silence_duration_ms"');
+  });
 });
 
 async function startServer(
@@ -560,10 +671,12 @@ async function createHarness(
   const root = await mkdtemp(join(tmpdir(), "whisper-pipeline-"));
   roots.push(root);
   const cliScenarioPath = join(root, "cli-scenarios.json");
+  const cliPidPath = join(root, "cli.pid");
   await writeFile(cliScenarioPath, `${JSON.stringify(cliScenarios)}\n`, "utf8");
   const config = makeConfig(root, server.port, overrides);
   const results: SessionResultPayload[] = [];
   const reportedErrors: Error[] = [];
+  const processSpawner = new FakeServerProcessSpawner(config);
   const manager = new TranscriptionManager({
     config,
     paths: appPaths(config),
@@ -573,18 +686,27 @@ async function createHarness(
         ...process.env,
         FAKE_WHISPER_CLI_SCENARIO_FILE: cliScenarioPath,
         FAKE_WHISPER_CLI_EXPECTED_MODEL: "/models/fast.bin",
+        FAKE_WHISPER_CLI_PID_FILE: cliPidPath,
       },
-      processSpawner: new FakeServerProcessSpawner(config),
+      processSpawner,
       errorReporter: (error) => reportedErrors.push(error),
       ...dependencies,
     },
   });
   managers.push(manager);
-  return { root, manager, results, reportedErrors };
+  return {
+    root,
+    manager,
+    results,
+    reportedErrors,
+    processSpawner,
+    cliPidPath,
+  };
 }
 
 class FakeServerProcessSpawner implements ProcessSpawner {
   private readonly delegate = new NodeProcessSpawner();
+  readonly spawns: { port: number; modelPath: string }[] = [];
 
   constructor(private readonly config: AppConfig) {}
 
@@ -595,6 +717,18 @@ class FakeServerProcessSpawner implements ProcessSpawner {
   ): Promise<ManagedProcess> {
     const portIndex = args.indexOf("--port");
     const port = Number(args[portIndex + 1]);
+    const modelIndex = args.indexOf("-m");
+    const modelPath = args[modelIndex + 1];
+    const expectedModel =
+      port === this.config.whisperServerPort
+        ? this.config.whisperModelPath
+        : this.config.whisperRobustModelPath;
+    if (modelPath !== expectedModel) {
+      throw new Error(
+        `Unexpected model for fake server port ${port}: ${modelPath}`,
+      );
+    }
+    this.spawns.push({ port, modelPath });
     const server = serversByPort.get(port);
     if (server === undefined) {
       throw new Error(`No fake whisper server registered on port ${port}`);
@@ -669,6 +803,31 @@ class UnownedHealthyProcessSpawner implements ProcessSpawner {
   }
 }
 
+class UnconfirmedTimeoutSpawner extends FakeServerProcessSpawner {
+  wavExistedBeforeReturn = false;
+
+  override async run(
+    _command: string,
+    args: readonly string[],
+    _options: ProcessRunOptions,
+  ): Promise<ProcessRunResult> {
+    const wavIndex = args.indexOf("-f");
+    const wavPath = args[wavIndex + 1];
+    if (wavPath !== undefined) {
+      const wav = await readFile(wavPath);
+      this.wavExistedBeforeReturn =
+        wav.subarray(0, 4).toString("ascii") === "RIFF";
+    }
+    return {
+      exitCode: null,
+      stdout: "",
+      stderr: "",
+      timedOut: true,
+      terminationConfirmed: false,
+    };
+  }
+}
+
 class FakeServerManagedProcess implements ManagedProcess {
   readonly command = "/unused/whisper-server";
   private closePromise: Promise<void> | null = null;
@@ -705,6 +864,15 @@ function processId(port: number): number {
 
 function portFromProcessId(pid: number): number {
   return pid - 100_000;
+}
+
+function processIsRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function makeConfig(
@@ -782,6 +950,17 @@ function stalledCapture(sessionId: string): StoppedCapture {
     stoppedAt,
     prebufferMilliseconds: 0,
     samples: samples(1_600),
+  };
+}
+
+function vadCapture(sessionId: string): StoppedCapture {
+  const stoppedAt = new Date();
+  return {
+    ...capture(sessionId),
+    startedAt: new Date(stoppedAt.getTime() - 15_000),
+    stoppedAt,
+    prebufferMilliseconds: 0,
+    samples: samples(240_000),
   };
 }
 
