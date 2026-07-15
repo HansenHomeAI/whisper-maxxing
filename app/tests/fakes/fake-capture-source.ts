@@ -46,6 +46,7 @@ export class FakeCaptureSource implements CaptureSource {
   private readonly configuredDefaultInputDeviceName: string;
   private startFailures: Error[] = [];
   private stopFailures: Error[] = [];
+  private stopGates: Promise<void>[] = [];
   private startOptions: CaptureSourceStartOptions | null = null;
   private sampleOffset = 0;
 
@@ -87,6 +88,7 @@ export class FakeCaptureSource implements CaptureSource {
 
   async stop(): Promise<void> {
     this.stopCallCount += 1;
+    await this.stopGates.shift();
     this.startOptions = null;
     const failure = this.stopFailures.shift();
     if (failure !== undefined) {
@@ -100,6 +102,16 @@ export class FakeCaptureSource implements CaptureSource {
 
   queueStopFailures(...failures: Error[]): void {
     this.stopFailures.push(...failures);
+  }
+
+  blockNextStop(): () => void {
+    let release: () => void = () => undefined;
+    this.stopGates.push(
+      new Promise<void>((resolve) => {
+        release = resolve;
+      }),
+    );
+    return release;
   }
 
   emitNextFrame(): Int16Array {

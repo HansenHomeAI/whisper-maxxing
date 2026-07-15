@@ -183,6 +183,29 @@ describe("CaptureEngine", () => {
     expect(engine.prebufferAvailableMilliseconds()).toBe(100);
   });
 
+  it("waits for delayed recovery and never restarts after disposal", async () => {
+    await startEngineAndFeedFrames(engine, source, clock, 1);
+    const releaseRecoveryStop = source.blockNextStop();
+    clock.advance(2_001);
+    expect(engine.readinessAssessment().reason).toBe("capture-buffer-stale");
+    expect(source.stopCallCount).toBe(1);
+
+    let disposalFinished = false;
+    const disposal = engine.dispose().then(() => {
+      disposalFinished = true;
+    });
+    await Promise.resolve();
+    expect(disposalFinished).toBe(false);
+
+    releaseRecoveryStop();
+    await disposal;
+    await engine.waitForRecoveryIdle();
+
+    expect(source.startCallCount).toBe(1);
+    expect(source.stopCallCount).toBe(2);
+    expect(engine.readinessAssessment().reason).toBe("capture-engine-stopped");
+  });
+
   it("preserves and reports startup plus cleanup failures", async () => {
     const startFailure = new Error("source start failed");
     const cleanupFailure = new Error("source cleanup failed");

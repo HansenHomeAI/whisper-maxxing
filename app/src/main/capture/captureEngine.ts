@@ -127,6 +127,7 @@ export class CaptureEngine {
   private deferredRestartReason: string | null = null;
   private consecutiveRestartFailures = 0;
   private disposed = false;
+  private lifecycleGeneration = 0;
 
   engineStartupMilliseconds: number | null = null;
   defaultInputDeviceName: string | null = null;
@@ -154,7 +155,8 @@ export class CaptureEngine {
 
   async startAsync(): Promise<void> {
     this.disposed = false;
-    await this.startSource();
+    const generation = ++this.lifecycleGeneration;
+    await this.startSource(generation);
   }
 
   startSession(profile: TranscriptionProfile): {
@@ -286,8 +288,14 @@ export class CaptureEngine {
 
   async dispose(): Promise<void> {
     this.disposed = true;
+    this.lifecycleGeneration += 1;
     this.activeSession = null;
     this.deferredRestartReason = null;
+    this.firstFrameRejecter?.(new CaptureLifecycleCancelledError());
+    const recovery = this.recoveryPromise;
+    if (recovery !== null) {
+      await recovery;
+    }
     try {
       await this.source.stop();
     } catch (error) {
@@ -299,7 +307,7 @@ export class CaptureEngine {
     }
   }
 
-  private async startSource(): Promise<void> {
+  private async startSource(generation: number): Promise<boolean> {
     this.startupInProgress = true;
     this.startupSignaled = false;
     this.startupError = null;
@@ -311,8 +319,15 @@ export class CaptureEngine {
         this.source.start({
           preferredInputDevice: this.config.preferredInputDevice,
           enforcePreferredInputDevice: this.config.enforcePreferredInputDevice,
-          onFrame: (frame) => this.handleFrame(frame),
+          onFrame: (frame) => {
+            if (this.isCurrentGeneration(generation)) {
+              this.handleFrame(frame);
+            }
+          },
           onError: (error) => {
+            if (!this.isCurrentGeneration(generation)) {
+              return;
+            }
             if (this.startupInProgress) {
               this.startupError = error;
               this.firstFrameRejecter?.(error);
@@ -324,27 +339,43 @@ export class CaptureEngine {
         }),
         this.startupTimeoutMilliseconds,
       );
+      if (!this.isCurrentGeneration(generation)) {
+        return false;
+      }
       this.defaultInputDeviceName = info.defaultInputDeviceName;
       this.engineRunning = true;
       const elapsedMilliseconds = Math.max(this.clock.now() - startedAt, 0);
       await this.waitForFirstFrame(
         Math.max(this.startupTimeoutMilliseconds - elapsedMilliseconds, 1),
       );
+      if (!this.isCurrentGeneration(generation)) {
+        return false;
+      }
       this.engineStartupMilliseconds = Math.max(this.clock.now() - startedAt, 0);
       this.startupInProgress = false;
       this.consecutiveRestartFailures = 0;
       this.engineHealthMessage = null;
+      return true;
     } catch (error) {
+      if (!this.isCurrentGeneration(generation)) {
+        return false;
+      }
       let surfacedError = toError(error);
       this.markStopped();
       try {
         await this.source.stop();
       } catch (cleanupError) {
+        if (!this.isCurrentGeneration(generation)) {
+          return false;
+        }
         surfacedError = combineErrors(
           surfacedError,
           toError(cleanupError),
           "Audio capture startup and source cleanup both failed.",
         );
+      }
+      if (!this.isCurrentGeneration(generation)) {
+        return false;
       }
       this.surfaceError(surfacedError);
       throw surfacedError;
@@ -412,24 +443,38 @@ export class CaptureEngine {
     if (this.recoveryPromise !== null) {
       return;
     }
-    this.recoveryPromise = this.recover(reason)
+    const generation = this.lifecycleGeneration;
+    const recovery = this.recover(reason, generation)
       .catch((error: unknown) => {
-        this.surfaceError(toError(error));
+        if (this.isCurrentGeneration(generation)) {
+          this.surfaceError(toError(error));
+        }
       })
       .finally(() => {
-        this.recoveryPromise = null;
+        if (this.recoveryPromise === recovery) {
+          this.recoveryPromise = null;
+        }
       });
+    this.recoveryPromise = recovery;
   }
 
-  private async recover(_reason: string): Promise<void> {
-    while (!this.disposed) {
+  private async recover(_reason: string, generation: number): Promise<void> {
+    while (this.isCurrentGeneration(generation)) {
       try {
         await this.source.stop();
+        if (!this.isCurrentGeneration(generation)) {
+          return;
+        }
         this.markStopped();
-        this.ringBuffer.clear();
-        await this.startSource();
+        const started = await this.startSource(generation);
+        if (!this.isCurrentGeneration(generation) || !started) {
+          return;
+        }
         return;
       } catch (error) {
+        if (!this.isCurrentGeneration(generation)) {
+          return;
+        }
         this.consecutiveRestartFailures += 1;
         this.surfaceError(
           new Error(`Audio capture restart failed: ${errorMessage(error)}`),
@@ -439,9 +484,15 @@ export class CaptureEngine {
         );
         if (decision.action === "restartProcess") {
           await this.restartProcess();
+          if (!this.isCurrentGeneration(generation)) {
+            return;
+          }
           return;
         }
         await this.delay(this.restartRetryDelayMilliseconds);
+        if (!this.isCurrentGeneration(generation)) {
+          return;
+        }
       }
     }
   }
@@ -469,6 +520,17 @@ export class CaptureEngine {
   private surfaceError(error: Error): void {
     this.engineHealthMessage = errorMessage(error);
     this.onError(error);
+  }
+
+  private isCurrentGeneration(generation: number): boolean {
+    return !this.disposed && generation === this.lifecycleGeneration;
+  }
+}
+
+class CaptureLifecycleCancelledError extends Error {
+  constructor() {
+    super("Audio capture lifecycle was cancelled.");
+    this.name = "CaptureLifecycleCancelledError";
   }
 }
 
