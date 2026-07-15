@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 const appRoot = path.resolve(import.meta.dirname, "../..");
 const releaseRoot = path.join(appRoot, "release");
@@ -35,9 +36,11 @@ console.log(`Artifact smoke passed: ${path.relative(appRoot, binary)} --version 
 
 async function verifyCompiledSetup() {
   const { ensureFirstRunConfig, MAC_ACCESSIBILITY_SETTINGS_URL, MAC_MICROPHONE_SETTINGS_URL } =
-    await import(path.join(appRoot, "dist-electron/main/firstRun.js"));
+    await import(
+      pathToFileURL(path.join(appRoot, "dist-electron/main/firstRun.js")).href
+    );
   const { configureLaunchAtLogin } = await import(
-    path.join(appRoot, "dist-electron/main/loginItem.js")
+    pathToFileURL(path.join(appRoot, "dist-electron/main/loginItem.js")).href
   );
   const temporary = await mkdtemp(path.join(os.tmpdir(), "whisper-dist-smoke-"));
   try {
