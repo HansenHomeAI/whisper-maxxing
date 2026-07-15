@@ -5,7 +5,6 @@ let context = null;
 let sourceNode = null;
 let workletNode = null;
 let mainPort = null;
-let transferStatusReported = false;
 
 ipcRenderer.on("capture:connect", (event) => {
   const [port] = event.ports;
@@ -20,9 +19,7 @@ ipcRenderer.on("capture:connect", (event) => {
     } else if (message?.type === "stop") {
       void stopCapture()
         .then(() => mainPort?.postMessage({ type: "stopped" }))
-        .catch((error) => {
-          postError(error);
-        });
+        .catch(postError);
     }
   };
   mainPort.start();
@@ -31,7 +28,6 @@ ipcRenderer.on("capture:connect", (event) => {
 
 async function startCapture(options) {
   try {
-    transferStatusReported = false;
     await stopCapture();
     let selectedStream = await navigator.mediaDevices.getUserMedia({
       audio: rawAudioConstraints(),
@@ -80,23 +76,19 @@ async function startCapture(options) {
     };
     workletNode.port.onmessage = (workletEvent) => {
       try {
-        const frame = workletEvent.data;
-        const samples =
-          frame.samples instanceof Int16Array
-            ? frame.samples
-            : new Int16Array(frame.samples);
-        const senderBuffer = samples.buffer;
-        const transferredBuffer = structuredClone(senderBuffer, {
-          transfer: [senderBuffer],
-        });
-        mainPort?.postMessage({ ...frame, samples: transferredBuffer });
-        if (!transferStatusReported) {
-          transferStatusReported = true;
+        const message = workletEvent.data;
+        if (message.type === "workletTransferStatus") {
           mainPort?.postMessage({
             type: "transferStatus",
-            detached: senderBuffer.byteLength === 0,
+            detached: message.detached,
           });
+          return;
         }
+        const samples =
+          message.samples instanceof Int16Array
+            ? message.samples
+            : new Int16Array(message.samples);
+        mainPort?.postMessage({ ...message, samples });
       } catch (error) {
         postError(error);
       }

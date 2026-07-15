@@ -71,7 +71,6 @@ interface ActiveCaptureSession {
   sessionId: string;
   transcriptionProfile: TranscriptionProfile;
   startedAt: Date;
-  startedAtMilliseconds: number;
   prebufferMilliseconds: number;
   samples: number[];
 }
@@ -180,12 +179,10 @@ export class CaptureEngine {
     const prebuffer = this.ringBuffer.snapshot();
     const prebufferMilliseconds = prebuffer.length / 16;
     const sessionId = this.createSessionId().toLowerCase();
-    const startedAtMilliseconds = this.clock.now();
     this.activeSession = {
       sessionId,
       transcriptionProfile: profile,
       startedAt: this.dateClock.nowDate(),
-      startedAtMilliseconds,
       prebufferMilliseconds,
       samples: Array.from(prebuffer),
     };
@@ -207,13 +204,12 @@ export class CaptureEngine {
       return null;
     }
 
-    const stoppedAtMilliseconds = this.clock.now();
     const stoppedAt = this.dateClock.nowDate();
     const samples = Int16Array.from(session.samples);
     const signalMetrics = analyzeSignal(samples);
     const audioDurationMilliseconds = samples.length / 16;
     const wallClockMilliseconds = Math.max(
-      stoppedAtMilliseconds - session.startedAtMilliseconds,
+      stoppedAt.getTime() - session.startedAt.getTime(),
       0,
     );
     const activeAudioMilliseconds = Math.max(

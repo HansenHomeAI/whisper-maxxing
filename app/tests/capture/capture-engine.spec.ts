@@ -84,6 +84,28 @@ describe("CaptureEngine", () => {
     expect(capture!.signalMetrics.probablySilent).toBe(false);
   });
 
+  it("uses wall dates for coverage when monotonic and wall clocks diverge", async () => {
+    let wallTime = Date.UTC(2026, 5, 1, 12, 0, 0);
+    engine = createEngine(source, clock, directory, undefined, {
+      dateClock: { nowDate: () => new Date(wallTime) },
+    });
+    await startEngineAndFeedFrames(engine, source, clock, 10);
+    engine.startSession("fast");
+    feedFrames(source, clock, 5);
+    wallTime += 750;
+
+    const capture = await engine.stopSession(false);
+
+    expect(capture).toMatchObject({
+      wallClockMilliseconds: 750,
+      activeAudioMilliseconds: 500,
+      droppedMilliseconds: 250,
+    });
+    expect(capture!.stoppedAt.getTime() - capture!.startedAt.getTime()).toBe(
+      750,
+    );
+  });
+
   it("discards without creating a WAV file", async () => {
     await startEngineAndFeedFrames(engine, source, clock, 1);
     engine.startSession("fast");

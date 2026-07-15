@@ -101,14 +101,22 @@ if (typeof AudioWorkletProcessor !== "undefined") {
       }
       const samples = this.downsampler.process(mono);
       if (samples.length > 0) {
+        const senderBuffer = samples.buffer;
         this.port.postMessage(
           {
             type: "frame",
             samples,
             timestampMilliseconds: currentTime * 1_000,
           },
-          [samples.buffer],
+          [senderBuffer],
         );
+        if (!this.transferStatusReported) {
+          this.transferStatusReported = true;
+          this.port.postMessage({
+            type: "workletTransferStatus",
+            detached: senderBuffer.byteLength === 0,
+          });
+        }
       }
       return true;
     }
