@@ -14,17 +14,20 @@ const MINIMUM_CHARACTERS_PER_SECOND = 4.5;
 const graphemeSegmenter = new Intl.Segmenter(undefined, {
   granularity: "grapheme",
 });
+const swiftWhitespace = /\p{White_Space}/u;
+const swiftWhitespaceEdges =
+  /^\p{White_Space}+|\p{White_Space}+$/gu;
 
 export function assessTranscriptQuality(
   text: string,
   audioDurationMilliseconds: number,
 ): TranscriptQualityAssessment {
-  const normalized = text.trim();
+  const normalized = text.replace(swiftWhitespaceEdges, "");
   const words = normalized.match(/[\p{L}\p{N}]+/gu) ?? [];
   const characterCount = Array.from(
     graphemeSegmenter.segment(normalized),
     ({ segment }) => segment,
-  ).filter((character) => !/^\s+$/u.test(character)).length;
+  ).filter((character) => !swiftWhitespace.test(character)).length;
   const seconds = Math.max(audioDurationMilliseconds / 1_000, 0.001);
   const wordsPerSecond = words.length / seconds;
   const charactersPerSecond = characterCount / seconds;

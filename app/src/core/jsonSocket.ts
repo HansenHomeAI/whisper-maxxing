@@ -22,6 +22,7 @@ export class JSONSocketServer {
   private stopPromise: Promise<void> | null = null;
   private stopRequested = false;
   private readonly reportedErrors: Error[] = [];
+  private readonly activeSockets = new Set<Socket>();
 
   constructor(
     private readonly host: string,
@@ -117,16 +118,14 @@ export class JSONSocketServer {
     this.stopRequested = true;
     await this.listenPromise?.catch(() => undefined);
 
-    if (server.listening) {
-      await new Promise<void>((resolve, reject) => {
-        server.close((error) => {
-          if (error === undefined) {
-            resolve();
-          } else {
-            reject(error);
-          }
-        });
-      });
+    const closePromise = server.listening
+      ? this.closeListeningServer(server)
+      : null;
+    for (const socket of this.activeSockets) {
+      socket.destroy();
+    }
+    if (closePromise !== null) {
+      await closePromise;
     }
     if (this.server === server) {
       this.server = null;
@@ -135,6 +134,10 @@ export class JSONSocketServer {
   }
 
   private handleClient(socket: Socket): void {
+    this.activeSockets.add(socket);
+    socket.once("close", () => {
+      this.activeSockets.delete(socket);
+    });
     let received = Buffer.alloc(0);
     let handled = false;
 
@@ -198,6 +201,34 @@ export class JSONSocketServer {
   private reportError(error: Error): void {
     this.reportedErrors.push(error);
     this.errorReporter(error);
+  }
+
+  private closeListeningServer(server: Server): Promise<void> {
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          const error = new Error("Timed out while closing the control socket.");
+          this.reportError(error);
+          resolve();
+        }
+      }, 1_000);
+      timeout.unref();
+
+      server.close((error) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timeout);
+        if (error === undefined) {
+          resolve();
+        } else {
+          reject(error);
+        }
+      });
+    });
   }
 }
 

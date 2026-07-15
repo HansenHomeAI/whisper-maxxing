@@ -1,5 +1,5 @@
 import { createConnection, createServer as createNetServer } from "node:net";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -81,6 +81,73 @@ describe("JSONSocket", () => {
     expect(server.takeReportedErrors()).toEqual([]);
   });
 
+  it("stops promptly with an idle accepted client", async () => {
+    server = new JSONSocketServer("127.0.0.1", 0, () => ({ ok: true }));
+    const address = await server.start();
+    const client = await connectRawClient(address.port);
+    client.write("partial-request");
+    await delay(20);
+
+    await withTimeout(server.stop(), 500);
+    await withTimeout(waitForClose(client), 500);
+  });
+
+  it("stops promptly while a request handler is stalled", async () => {
+    let handlerStarted: () => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      handlerStarted = resolve;
+    });
+    server = new JSONSocketServer("127.0.0.1", 0, () => {
+      handlerStarted();
+      return new Promise<ControlResponse>(() => undefined);
+    });
+    const address = await server.start();
+    const client = await connectRawClient(address.port);
+    client.write('{"command":"status"}\n');
+    await started;
+
+    await withTimeout(server.stop(), 500);
+    await withTimeout(waitForClose(client), 500);
+  });
+
+  it("reports an asynchronous client transport reset", async () => {
+    let handlerStarted: () => void = () => undefined;
+    let releaseHandler: () => void = () => undefined;
+    let reportError: (error: Error) => void = () => undefined;
+    const started = new Promise<void>((resolve) => {
+      handlerStarted = resolve;
+    });
+    const handlerGate = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    const reportedError = new Promise<Error>((resolve) => {
+      reportError = resolve;
+    });
+    server = new JSONSocketServer(
+      "127.0.0.1",
+      0,
+      async () => {
+        handlerStarted();
+        await handlerGate;
+        return { ok: true };
+      },
+      reportError,
+    );
+    const address = await server.start();
+    const client = await connectRawClient(address.port);
+    client.on("error", () => undefined);
+    client.write('{"command":"status"}\n');
+    await started;
+
+    client.resetAndDestroy();
+    await delay(20);
+    releaseHandler();
+
+    const error = await withTimeout(reportedError, 1_000);
+    expect(error.message).toContain("client transport error");
+    expect(server.takeReportedErrors()).toContain(error);
+  });
+
   it("refuses non-loopback server and client hosts", async () => {
     expect(() => new JSONSocketServer("0.0.0.0", 44_124, () => ({ ok: true }))).toThrow(
       "loopback-only",
@@ -128,4 +195,42 @@ async function findAvailablePort(): Promise<number> {
     probe.close((error) => (error === undefined ? resolve() : reject(error)));
   });
   return address.port;
+}
+
+function connectRawClient(port: number): Promise<Socket> {
+  return new Promise((resolve, reject) => {
+    const socket = createConnection({ host: "127.0.0.1", port });
+    socket.once("connect", () => resolve(socket));
+    socket.once("error", reject);
+  });
+}
+
+function waitForClose(socket: Socket): Promise<void> {
+  if (socket.closed) {
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => socket.once("close", () => resolve()));
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function withTimeout<T>(promise: Promise<T>, milliseconds: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(
+      () => reject(new Error(`Operation exceeded ${milliseconds} ms.`)),
+      milliseconds,
+    );
+    promise.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        reject(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
 }

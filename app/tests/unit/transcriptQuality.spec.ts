@@ -16,4 +16,12 @@ describe("TranscriptQuality Unicode parity", () => {
 
     expect(assessment.characterCount).toBe(1);
   });
+
+  it("trims Unicode NEL exactly like Foundation", () => {
+    const assessment = assessTranscriptQuality("\u0085".repeat(35), 8_000);
+
+    expect(assessment.characterCount).toBe(0);
+    expect(assessment.requiresSecondPass).toBe(false);
+    expect(assessment.reason).toBeNull();
+  });
 });
