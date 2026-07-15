@@ -255,6 +255,9 @@ and remains the author's daily driver until sign-off.
 - D23: Fake CLI timeout coverage allows 500 ms for Node process startup on Windows while
   remaining strictly bounded, and nonce-backed protocol assertions recognize both fast
   `server` and explicit `robust-server` modes as real resident-server inference.
+- D24: Nested acceptance builds invoke npm's resolved CLI JavaScript with npm's Node binary
+  when available. This avoids Windows `.cmd` spawn semantics while preserving the exact
+  production build command; direct `npm`/`npm.cmd` remains a non-npm fallback.
 
 ## Pathfinder findings
 

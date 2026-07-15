@@ -159,14 +159,20 @@ export async function startManagedElectronTarget(
 }
 
 function buildProductionApp(appRoot: string): void {
-  const npm = process.platform === "win32" ? "npm.cmd" : "npm";
-  const result = spawnSync(npm, ["run", "build"], {
+  const npmCli = process.env.npm_execpath?.trim();
+  const node = process.env.npm_node_execpath?.trim() || process.execPath;
+  const command = npmCli ? node : process.platform === "win32" ? "npm.cmd" : "npm";
+  const args = npmCli ? [npmCli, "run", "build"] : ["run", "build"];
+  const result = spawnSync(command, args, {
     cwd: appRoot,
     env: process.env,
     stdio: "inherit",
+    shell: npmCli ? false : process.platform === "win32",
   });
   if (result.status !== 0) {
-    throw new Error(`Production Electron build failed with status ${String(result.status)}`);
+    throw new Error(
+      `Production Electron build failed with status ${String(result.status)}: ${result.error?.message ?? "no spawn error"}`,
+    );
   }
 }
 
