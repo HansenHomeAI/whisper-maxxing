@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "noEmitOnError": true,
+    "outDir": "./dist-electron",
+    "rootDir": "./src",
+    "sourceMap": true
+  },
+  "include": ["src/core/**/*.ts", "src/main/**/*.ts"],
+  "exclude": ["src/renderer/**", "tests/**"]
+}

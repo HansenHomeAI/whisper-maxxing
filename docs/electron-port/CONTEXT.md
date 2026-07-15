@@ -227,6 +227,10 @@ and remains the author's daily driver until sign-off.
   transfer list; attempting to transfer an `ArrayBuffer` there hangs the pinned runtime.
   Capture E2E therefore proves actual worklet-sender detachment plus intact PCM receipt in
   main, without a synthetic local `structuredClone` detachment.
+- D17: Production compilation is explicit and cross-platform: Vite builds all renderer
+  pages, `tsc -p tsconfig.build.json` emits core/main ESM under `dist-electron`, and a
+  dedicated Vite library build emits the sandboxed settings preload as CommonJS beside the
+  compiled settings controller. Packaging consumes only those production outputs.
 
 ## Pathfinder findings
 
