@@ -54,7 +54,10 @@ export class OverlayWindow implements AlertSink, OverlaySink {
         sandbox: true,
       },
     });
-    window.setAlwaysOnTop(true, "floating");
+    window.setAlwaysOnTop(true, "screen-saver");
+    if (process.platform === "darwin") {
+      window.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+    }
     window.setIgnoreMouseEvents(true, { forward: true });
     window.on("closed", () => {
       if (this.window === window) {
