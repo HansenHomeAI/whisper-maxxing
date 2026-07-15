@@ -3,6 +3,7 @@ export {
   registerSystemUxHotkeys,
   registerUxHotkeys,
   HOTKEY_ACCELERATORS,
+  historyHotkeyAccelerator,
 } from "./hotkeys.js";
 export { normalizeTranscript } from "./normalizeTranscript.js";
 export { OverlayWindow, overlayBounds } from "./overlayWindow.js";

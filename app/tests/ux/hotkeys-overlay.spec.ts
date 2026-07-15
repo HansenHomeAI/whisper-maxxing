@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   HOTKEY_ACCELERATORS,
+  historyHotkeyAccelerator,
   registerUxHotkeys,
   type HotkeyRegistrar,
 } from "../../src/main/ux/hotkeys.js";
@@ -17,7 +18,13 @@ describe("UX hotkeys", () => {
       toggleDictation: "CommandOrControl+.",
       retryRobust: "CommandOrControl+;",
       cancelRecording: "CommandOrControl+,",
+      openHistory:
+        process.platform === "darwin"
+          ? "Command+Control+H"
+          : "CommandOrControl+Shift+H",
     });
+    expect(historyHotkeyAccelerator("darwin")).toBe("Command+Control+H");
+    expect(historyHotkeyAccelerator("win32")).toBe("CommandOrControl+Shift+H");
     expect(UX_CONTRACT.hotkeys).toEqual({
       toggleDictation: "Command+.",
       retryRobust: "Command+;",
@@ -31,7 +38,7 @@ describe("UX hotkeys", () => {
     const registrar: HotkeyRegistrar = {
       register(accelerator) {
         registered.push(accelerator);
-        return registered.length < 3;
+        return registered.length < 4;
       },
       unregister(accelerator) {
         unregistered.push(accelerator);
@@ -46,9 +53,43 @@ describe("UX hotkeys", () => {
       registerUxHotkeys(
         controller as Parameters<typeof registerUxHotkeys>[0],
         registrar,
+        async () => undefined,
       ),
-    ).toThrow("Unable to register global shortcut CommandOrControl+,");
-    expect(unregistered).toEqual(["CommandOrControl+.", "CommandOrControl+;"]);
+    ).toThrow(`Unable to register global shortcut ${HOTKEY_ACCELERATORS.openHistory}`);
+    expect(unregistered).toEqual([
+      "CommandOrControl+.",
+      "CommandOrControl+;",
+      "CommandOrControl+,",
+    ]);
+  });
+
+  it("opens history through the dedicated global shortcut", async () => {
+    const callbacks = new Map<string, () => void>();
+    let historyOpenCount = 0;
+    const registrar: HotkeyRegistrar = {
+      register(accelerator, callback) {
+        callbacks.set(accelerator, callback);
+        return true;
+      },
+      unregister: () => undefined,
+    };
+    const controller = {
+      toggleDictation: async () => undefined,
+      retryRobustTranscription: async () => undefined,
+      cancelRecording: async () => undefined,
+    };
+    registerUxHotkeys(
+      controller as Parameters<typeof registerUxHotkeys>[0],
+      registrar,
+      async () => {
+        historyOpenCount += 1;
+      },
+    );
+
+    callbacks.get(HOTKEY_ACCELERATORS.openHistory)?.();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(historyOpenCount).toBe(1);
   });
 });
 

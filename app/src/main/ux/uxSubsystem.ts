@@ -7,6 +7,7 @@ export interface UxSubsystemOptions {
   controller: DictationController;
   alerts: AlertSink;
   hotkeys: HotkeyRegistrar;
+  openHistory(): Promise<void>;
   scheduler?: Pick<Scheduler, "setInterval" | "clearInterval">;
   logger?: Logger;
   setTimeout?: (callback: () => void, milliseconds: number) => unknown;
@@ -54,6 +55,7 @@ export function createUxSubsystem(options: UxSubsystemOptions): UxSubsystem {
       unregisterHotkeys = registerUxHotkeys(
         options.controller,
         options.hotkeys,
+        options.openHistory,
         (error) => surface("hotkey error", error),
       );
       startupTimers.push(
