@@ -52,7 +52,7 @@ p {
 
 h1 {
   margin-bottom: 0;
-  font-size: 19px;
+  font-size: 18px;
   font-weight: 650;
   letter-spacing: -0.025em;
 }
@@ -69,7 +69,7 @@ h2 {
 .eyebrow {
   margin-bottom: 3px;
   color: #666;
-  font-size: 9px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -78,7 +78,7 @@ h2 {
 button,
 input {
   border: 1px solid rgb(255 255 255 / 10%);
-  border-radius: 8px;
+  border-radius: 999px;
   color: inherit;
   background: rgb(255 255 255 / 5%);
   font: inherit;
@@ -89,9 +89,9 @@ input {
 
 button {
   min-height: 28px;
-  padding: 5px 9px;
+  padding: 5px 12px;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
 }
 
 button:hover,
@@ -114,8 +114,8 @@ button.danger:focus-visible {
 input[type="search"] {
   width: 190px;
   height: 30px;
-  padding: 5px 9px;
-  font-size: 11px;
+  padding: 5px 12px;
+  font-size: 12px;
 }
 
 input[type="search"]::placeholder {
@@ -123,14 +123,10 @@ input[type="search"]::placeholder {
 }
 
 #history-list {
+  display: grid;
+  gap: 8px;
   margin: 10px 0 0;
   padding: 0;
-  overflow: hidden;
-  border: 1px solid rgb(255 255 255 / 9%);
-  border-radius: 10px;
-  background: rgb(10 10 10 / 74%);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 28%);
-  backdrop-filter: blur(20px) saturate(115%);
   list-style: none;
 }
 
@@ -139,13 +135,12 @@ input[type="search"]::placeholder {
 }
 
 .history-entry {
-  padding: 10px 11px 9px;
-  border-bottom: 1px solid rgb(255 255 255 / 8%);
-  background: transparent;
-}
-
-.history-entry:last-child {
-  border-bottom: 0;
+  padding: 11px 13px 10px;
+  border: 1px solid rgb(255 255 255 / 9%);
+  border-radius: 18px;
+  background: rgb(10 10 10 / 74%);
+  box-shadow: 0 10px 28px rgb(0 0 0 / 24%);
+  backdrop-filter: blur(20px) saturate(115%);
 }
 
 .history-entry:hover {
@@ -155,7 +150,7 @@ input[type="search"]::placeholder {
 .entry-text {
   margin-bottom: 7px;
   color: #f2f2f2;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.38;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
@@ -173,21 +168,21 @@ input[type="search"]::placeholder {
 }
 
 .profile {
-  padding: 2px 6px;
+  padding: 3px 8px;
   border: 1px solid rgb(255 255 255 / 8%);
   border-radius: 999px;
   color: #8d8d92;
   background: rgb(255 255 255 / 4%);
-  font-size: 8px;
+  font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
 .copy-button {
-  min-height: 22px;
-  padding: 2px 7px;
-  border-radius: 6px;
+  min-height: 24px;
+  padding: 2px 9px;
+  border-radius: 999px;
   color: #aaa;
   font-size: 10px;
 }
@@ -197,11 +192,11 @@ input[type="search"]::placeholder {
   margin: 10px 0 0;
   padding: 18px 12px;
   border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 10px;
+  border-radius: 18px;
   color: #666;
   text-align: center;
   background: rgb(10 10 10 / 74%);
-  font-size: 11px;
+  font-size: 12px;
 }
 
 .error {
@@ -228,7 +223,7 @@ pre {
   padding: 10px;
   overflow: auto;
   border: 1px solid rgb(255 255 255 / 8%);
-  border-radius: 8px;
+  border-radius: 16px;
   color: #a7a7ab;
   background: rgb(8 8 8 / 90%);
   font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
