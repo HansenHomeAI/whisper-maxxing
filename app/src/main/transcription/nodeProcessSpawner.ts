@@ -263,7 +263,11 @@ function executable(
   args: readonly string[],
 ): { command: string; args: string[] } {
   if (extname(command).toLowerCase() === ".mjs") {
-    return { command: process.execPath, args: [command, ...args] };
+    const nodeBinary =
+      process.env.WD_NODE_BINARY?.trim() ||
+      process.env.npm_node_execpath?.trim() ||
+      process.execPath;
+    return { command: nodeBinary, args: [command, ...args] };
   }
   return { command, args: [...args] };
 }
