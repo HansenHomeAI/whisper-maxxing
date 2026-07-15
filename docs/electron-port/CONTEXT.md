@@ -205,6 +205,10 @@ and remains the author's daily driver until sign-off.
   subsystem sources are present, and copies the capture preload/worklet beside the capture
   page. Production window defaults must resolve these built assets, while tests may inject
   explicit source or temporary build paths.
+- D13: Renderer builds use relative asset URLs (`base: "./"`) so every page remains
+  loadable from its packaged `file://` location, including nested settings and capture
+  pages. Browser E2E tests must consume the production Vite output rather than replacing
+  this setting in a test-only build.
 
 ## Pathfinder findings
 
