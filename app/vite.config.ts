@@ -17,6 +17,7 @@ const rendererInputs = Object.fromEntries(
 );
 
 export default defineConfig({
+  base: "./",
   root: rendererRoot,
   plugins: [copyCaptureAssets()],
   build: {

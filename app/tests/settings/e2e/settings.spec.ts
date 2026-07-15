@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -34,6 +34,7 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
   test.setTimeout(60_000);
   temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "wd-settings-e2e-"));
   const artifacts = await buildApplication(temporaryDirectory);
+  await assertPackagedRendererAssets(artifacts.rendererPath);
   const controlPort = await findAvailablePort();
   const configPath = path.join(temporaryDirectory, "config.json");
   const historyPath = path.join(temporaryDirectory, "history.jsonl");
@@ -135,7 +136,6 @@ async function buildApplication(outputRoot: string): Promise<{
 }> {
   const mainOutput = path.join(outputRoot, "main");
   const preloadOutput = path.join(outputRoot, "preload");
-  const rendererOutput = path.join(outputRoot, "renderer");
 
   await build({
     configFile: false,
@@ -170,32 +170,30 @@ async function buildApplication(outputRoot: string): Promise<{
     },
   });
   await build({
-    base: "./",
-    configFile: false,
+    configFile: path.join(appRoot, "vite.config.ts"),
     logLevel: "silent",
-    root: path.join(sourceRoot, "renderer"),
-    build: {
-      emptyOutDir: true,
-      outDir: rendererOutput,
-      rollupOptions: {
-        input: {
-          main: path.join(sourceRoot, "renderer", "index.html"),
-          settings: path.join(
-            sourceRoot,
-            "renderer",
-            "settings",
-            "index.html",
-          ),
-        },
-      },
-    },
   });
 
   return {
     mainPath: path.join(mainOutput, "electronMain.mjs"),
     preloadPath: path.join(preloadOutput, "settingsPreload.cjs"),
-    rendererPath: path.join(rendererOutput, "settings", "index.html"),
+    rendererPath: path.join(appRoot, "dist-renderer", "settings", "index.html"),
   };
+}
+
+async function assertPackagedRendererAssets(rendererPath: string): Promise<void> {
+  const html = await readFile(rendererPath, "utf8");
+  const references = [...html.matchAll(/(?:src|href)="([^"]+)"/g)]
+    .map((match) => match[1])
+    .filter((reference): reference is string =>
+      reference !== undefined && !reference.startsWith("data:"),
+    );
+  expect(references.length).toBeGreaterThan(0);
+  for (const reference of references) {
+    expect(reference.startsWith("/")).toBe(false);
+    const referencedPath = path.resolve(path.dirname(rendererPath), reference);
+    await expect(access(referencedPath)).resolves.toBeUndefined();
+  }
 }
 
 async function settingsPage(application: ElectronApplication): Promise<Page> {
