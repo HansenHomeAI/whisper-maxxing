@@ -236,6 +236,10 @@ and remains the author's daily driver until sign-off.
   real capture renderer, transcription ladder, history, and control socket but omits the
   tray/hotkey result poller so the harness is the sole `nextResult` consumer. Normal app
   launches always enable the complete UX shell.
+- D19: Script-backed process fixtures ending in `.mjs` run with `WD_NODE_BINARY`, then
+  npm's `npm_node_execpath`, and only then `process.execPath`. Electron's `process.execPath`
+  is the app executable rather than Node, so this explicit runner keeps the same real child
+  process and HTTP behavior on macOS and Windows without adding a test-only transport.
 
 ## Pathfinder findings
 
