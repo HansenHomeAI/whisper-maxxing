@@ -101,12 +101,132 @@ export function decodeControlRequest(value: unknown): ControlRequest {
 }
 
 export function decodeControlResponse(value: unknown): ControlResponse {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("Unable to decode the control response.");
-  }
-  const response = value as Record<string, unknown>;
-  if (typeof response.ok !== "boolean") {
-    throw new Error("Unable to decode the control response.");
-  }
+  const response = requireObject(value);
+  requireBoolean(response, "ok");
+  optional(response, "error", requireStringValue);
+  optional(response, "recording", requireBooleanValue);
+  optional(response, "pendingCount", requireIntegerValue);
+  optional(response, "sessionId", requireStringValue);
+  optional(response, "resultAvailable", requireBooleanValue);
+  optional(response, "result", validateSessionResult);
+  optional(response, "status", validateStatus);
+  optional(response, "clientObservedMilliseconds", requireNumberValue);
+  optional(response, "coldBootMilliseconds", requireNumberValue);
   return response as unknown as ControlResponse;
+}
+
+function validateSessionResult(value: unknown): void {
+  const result = requireObject(value);
+  requireString(result, "sessionId");
+  requireString(result, "text");
+  validateSessionMetrics(requireField(result, "metrics"));
+  optional(result, "salvagePath", requireStringValue);
+  optional(result, "errorMessage", requireStringValue);
+}
+
+function validateSessionMetrics(value: unknown): void {
+  const metrics = requireObject(value);
+  requireString(metrics, "sessionId");
+  requireNumber(metrics, "prebufferMilliseconds");
+  requireNumber(metrics, "audioDurationMilliseconds");
+  optional(metrics, "transcriptionProfile", requireStringValue);
+  optional(metrics, "captureStartedAtISO8601", requireStringValue);
+  optional(metrics, "captureStoppedAtISO8601", requireStringValue);
+  optional(metrics, "captureWallClockMilliseconds", requireNumberValue);
+  optional(metrics, "activeAudioMilliseconds", requireNumberValue);
+  optional(metrics, "captureDroppedMilliseconds", requireNumberValue);
+  optional(metrics, "captureCoverageRatio", requireNumberValue);
+  optional(metrics, "transcriptionMode", requireStringValue);
+  optional(metrics, "transcriptionMilliseconds", requireNumberValue);
+  optional(metrics, "queueWaitMilliseconds", requireNumberValue);
+  optional(metrics, "completedAtISO8601", requireStringValue);
+}
+
+function validateStatus(value: unknown): void {
+  const status = requireObject(value);
+  requireBoolean(status, "recording");
+  requireInteger(status, "pendingCount");
+  requireBoolean(status, "engineReady");
+  requireNumber(status, "prebufferAvailableMilliseconds");
+  requireString(status, "serverState");
+  optional(status, "recordingProfile", requireStringValue);
+  optional(status, "engineHealthMessage", requireStringValue);
+  optional(status, "engineStartupMilliseconds", requireNumberValue);
+  optional(status, "preferredInputDevice", requireStringValue);
+  optional(status, "defaultInputDevice", requireStringValue);
+  optional(status, "robustServerState", requireStringValue);
+  optional(status, "availableDiskSpaceBytes", requireIntegerValue);
+  optional(status, "lowDiskSpaceMessage", requireStringValue);
+}
+
+type JsonObject = Record<string, unknown>;
+
+function decodingError(): Error {
+  return new Error("Unable to decode the control response.");
+}
+
+function requireObject(value: unknown): JsonObject {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw decodingError();
+  }
+  return value as JsonObject;
+}
+
+function requireField(source: JsonObject, field: string): unknown {
+  if (!(field in source) || source[field] === null || source[field] === undefined) {
+    throw decodingError();
+  }
+  return source[field];
+}
+
+function requireString(source: JsonObject, field: string): void {
+  requireStringValue(requireField(source, field));
+}
+
+function requireBoolean(source: JsonObject, field: string): void {
+  requireBooleanValue(requireField(source, field));
+}
+
+function requireNumber(source: JsonObject, field: string): void {
+  requireNumberValue(requireField(source, field));
+}
+
+function requireInteger(source: JsonObject, field: string): void {
+  requireIntegerValue(requireField(source, field));
+}
+
+function optional(
+  source: JsonObject,
+  field: string,
+  validate: (value: unknown) => void,
+): void {
+  const value = source[field];
+  if (value !== undefined && value !== null) {
+    validate(value);
+  }
+}
+
+function requireStringValue(value: unknown): void {
+  if (typeof value !== "string") {
+    throw decodingError();
+  }
+}
+
+function requireBooleanValue(value: unknown): void {
+  if (typeof value !== "boolean") {
+    throw decodingError();
+  }
+}
+
+function requireNumberValue(value: unknown): void {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw decodingError();
+  }
+}
+
+function requireIntegerValue(value: unknown): void {
+  requireNumberValue(value);
+  if (!Number.isSafeInteger(value)) {
+    throw decodingError();
+  }
 }

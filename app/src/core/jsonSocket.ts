@@ -14,20 +14,26 @@ const DECODING_ERROR = "Unable to decode the control response.";
 export type ControlRequestHandler = (
   request: ControlRequest,
 ) => ControlResponse | Promise<ControlResponse>;
+export type JSONSocketErrorReporter = (error: Error) => void;
 
 export class JSONSocketServer {
   private server: Server | null = null;
+  private listenPromise: Promise<void> | null = null;
+  private stopPromise: Promise<void> | null = null;
+  private stopRequested = false;
+  private readonly reportedErrors: Error[] = [];
 
   constructor(
     private readonly host: string,
     private readonly port: number,
     private readonly handler: ControlRequestHandler,
+    private readonly errorReporter: JSONSocketErrorReporter = defaultErrorReporter,
   ) {
     assertLoopback(host);
   }
 
   async start(): Promise<AddressInfo> {
-    if (this.server !== null) {
+    if (this.server !== null || this.stopPromise !== null) {
       throw new Error("The control socket is already listening.");
     }
 
@@ -35,24 +41,43 @@ export class JSONSocketServer {
       this.handleClient(socket);
     });
     this.server = server;
+    this.stopRequested = false;
+
+    const listenPromise = new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        server.off("listening", onListening);
+        reject(error);
+      };
+      const onListening = (): void => {
+        server.off("error", onError);
+        server.on("error", (error) => {
+          this.reportError(
+            new Error(`Control socket server error: ${error.message}`),
+          );
+        });
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen({ host: this.host, port: this.port, backlog: 16 });
+    });
+    this.listenPromise = listenPromise;
 
     try {
-      await new Promise<void>((resolve, reject) => {
-        const onError = (error: Error): void => {
-          server.off("listening", onListening);
-          reject(error);
-        };
-        const onListening = (): void => {
-          server.off("error", onError);
-          resolve();
-        };
-        server.once("error", onError);
-        server.once("listening", onListening);
-        server.listen({ host: this.host, port: this.port, backlog: 16 });
-      });
+      await listenPromise;
     } catch (error) {
-      this.server = null;
+      if (this.server === server) {
+        this.server = null;
+      }
       throw new Error(`Unable to bind the control socket: ${errorMessage(error)}`);
+    } finally {
+      if (this.listenPromise === listenPromise) {
+        this.listenPromise = null;
+      }
+    }
+
+    if (this.stopRequested) {
+      throw new Error("The control socket was stopped while it was starting.");
     }
 
     const address = server.address();
@@ -64,20 +89,49 @@ export class JSONSocketServer {
   }
 
   async stop(): Promise<void> {
-    const server = this.server;
-    this.server = null;
-    if (server === null || !server.listening) {
+    if (this.stopPromise !== null) {
+      await this.stopPromise;
       return;
     }
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => {
-        if (error === undefined) {
-          resolve();
-        } else {
-          reject(error);
-        }
+
+    const stopPromise = this.stopServer();
+    this.stopPromise = stopPromise;
+    try {
+      await stopPromise;
+    } finally {
+      if (this.stopPromise === stopPromise) {
+        this.stopPromise = null;
+      }
+    }
+  }
+
+  takeReportedErrors(): Error[] {
+    return this.reportedErrors.splice(0, this.reportedErrors.length);
+  }
+
+  private async stopServer(): Promise<void> {
+    const server = this.server;
+    if (server === null) {
+      return;
+    }
+    this.stopRequested = true;
+    await this.listenPromise?.catch(() => undefined);
+
+    if (server.listening) {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error === undefined) {
+            resolve();
+          } else {
+            reject(error);
+          }
+        });
       });
-    });
+    }
+    if (this.server === server) {
+      this.server = null;
+    }
+    this.stopRequested = false;
   }
 
   private handleClient(socket: Socket): void {
@@ -103,7 +157,10 @@ export class JSONSocketServer {
         void this.respond(socket, received.toString("utf8"));
       }
     });
-    socket.on("error", () => {
+    socket.on("error", (error) => {
+      this.reportError(
+        new Error(`Control socket client transport error: ${error.message}`),
+      );
       socket.destroy();
     });
   }
@@ -131,10 +188,16 @@ export class JSONSocketServer {
     try {
       socket.end(`${JSON.stringify(response)}\n`);
     } catch (error) {
-      socket.destroy(
-        new Error(`Unable to encode the control request: ${errorMessage(error)}`),
+      this.reportError(
+        new Error(`Unable to encode the control response: ${errorMessage(error)}`),
       );
+      socket.destroy();
     }
+  }
+
+  private reportError(error: Error): void {
+    this.reportedErrors.push(error);
+    this.errorReporter(error);
   }
 }
 
@@ -219,4 +282,8 @@ function assertLoopback(host: string): void {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function defaultErrorReporter(error: Error): void {
+  console.error(`[control-socket] ${error.message}`);
 }

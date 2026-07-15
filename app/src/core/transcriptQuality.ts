@@ -11,6 +11,9 @@ export interface TranscriptQualityAssessment {
 const LONG_AUDIO_THRESHOLD_MILLISECONDS = 8_000;
 const MINIMUM_WORDS_PER_SECOND = 0.8;
 const MINIMUM_CHARACTERS_PER_SECOND = 4.5;
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: "grapheme",
+});
 
 export function assessTranscriptQuality(
   text: string,
@@ -18,7 +21,10 @@ export function assessTranscriptQuality(
 ): TranscriptQualityAssessment {
   const normalized = text.trim();
   const words = normalized.match(/[\p{L}\p{N}]+/gu) ?? [];
-  const characterCount = normalized.replace(/\s/gu, "").length;
+  const characterCount = Array.from(
+    graphemeSegmenter.segment(normalized),
+    ({ segment }) => segment,
+  ).filter((character) => !/^\s+$/u.test(character)).length;
   const seconds = Math.max(audioDurationMilliseconds / 1_000, 0.001);
   const wordsPerSecond = words.length / seconds;
   const charactersPerSecond = characterCount / seconds;
