@@ -196,6 +196,23 @@ and remains the author's daily driver until sign-off.
   ST-1 merges — new deps only via a core-agent commit at a merge gate.
 - D8: Windows hotkeys use Control instead of Command; all other UX strings/timings identical.
 - D9: `openSettings` is the only new control command in this port.
+- D10: Subsystem Playwright specs stay inside their brief-owned test trees:
+  `tests/capture/e2e`, `tests/ux/e2e`, and `tests/settings/e2e`. The frozen npm E2E commands
+  target those directories explicitly, and Playwright scans only those three patterns. This
+  resolves the original scaffold path mismatch without broadening branch ownership.
+- D11: Whisper server state is exactly `stopped | starting | ready`, with transitions
+  matching the Swift implementation. Only an explicit restart or stop sets `stopped`;
+  after a successful restart, a subsequent inference failure leaves the running server
+  `ready` rather than inventing a liveness failure.
+- D12: The renderer production build is a Vite multi-page build rooted at `src/renderer`.
+  It emits the main page plus `settings/index.html` and `capture/capture.html` when those
+  subsystem sources are present, and copies the capture preload/worklet beside the capture
+  page. Production window defaults must resolve these built assets, while tests may inject
+  explicit source or temporary build paths.
+- D13: Renderer builds use relative asset URLs (`base: "./"`) so every page remains
+  loadable from its packaged `file://` location, including nested settings and capture
+  pages. Browser E2E tests must consume the production Vite output rather than replacing
+  this setting in a test-only build.
 
 ## Pathfinder findings
 
