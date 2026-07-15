@@ -248,6 +248,10 @@ and remains the author's daily driver until sign-off.
   unit-only smoke job. Both macOS and Windows run every TypeScript suite, renderer E2E,
   black-box protocol suite, and 50-cycle soak; the Windows leg also executes the Pester
   bootstrap contract. Packaging remains a separate two-OS artifact matrix.
+- D22: `WD_HEADLESS=1` is an isolated verification runtime and never mutates the operating
+  system's login-item registration. The managed protocol config also sets
+  `launchAtLogin:false` defensively; normal application launches still apply the user's
+  configured launch-at-login preference.
 
 ## Pathfinder findings
 

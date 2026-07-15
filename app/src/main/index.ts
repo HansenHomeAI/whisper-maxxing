@@ -68,7 +68,9 @@ async function startApplication(): Promise<void> {
     explicitConfigPath ? { configPath: explicitConfigPath } : {},
   );
   const config = firstRun.config;
-  configureLaunchAtLogin(app, config);
+  if (process.env.WD_HEADLESS !== "1") {
+    configureLaunchAtLogin(app, config);
+  }
   if (firstRun.created && process.platform === "darwin") {
     await guideMacPermissions();
   }
