@@ -55,3 +55,9 @@ The core agent may APPEND clarifying rules under "Amendments" below; amendments 
   an Amendment here rather than letting a third agent hit it.
 
 ## Amendments (core agent appends below; never edits above this line)
+
+- A1 (capture E2E timeout recurrence): Electron fake-microphone harnesses must set the
+  fake-device and fake-audio Chromium flags before app readiness, use an explicit renderer
+  readiness/artifact handshake, dispose the capture engine during `before-quit`, and close
+  Electron plus temporary files in `finally`. On macOS CI the dedicated test harness may use
+  `--no-sandbox`; production windows must retain their configured sandbox behavior.
