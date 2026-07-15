@@ -1,0 +1,97 @@
+export const UX_CONTRACT = {
+  source: "hammerspoon/init.lua @ feature/electron-port base (1e7a840)",
+  note:
+    "The UX contract: exact strings, timings, and geometry the Electron shell must reproduce on macOS (Windows substitutes Control for Command in hotkeys only). app/src must import these values from a constants module whose unit test loads THIS file and asserts equality string-by-string.",
+  hotkeys: {
+    toggleDictation: "Command+.",
+    retryRobust: "Command+;",
+    cancelRecording: "Command+,",
+  },
+  alerts: {
+    ready: "Dictation Ready",
+    configMissing: "Dictation config missing",
+    starting: "Starting",
+    startingRobust: "Starting Robust",
+    recording: "Recording",
+    recordingRobust: "Robust Recording",
+    transcriptReady: "Transcript Ready",
+    transcriptReadyRobust: "Large Model Transcript Ready",
+    processing: "Processing Audio",
+    processingRobust: "Retranscribing Audio",
+    recordingCanceled: "Recording Canceled",
+    recordingCanceledRobust: "Robust Recording Canceled",
+    noSession: "No Session",
+    noOutput: "No Output",
+    transcriptionFailed: "Transcription Failed",
+    stopRecordingFirst: "Stop Recording First",
+    retryingLastAudio: "Retrying Last Audio",
+    retryingWillReplace: "Retrying, Will Replace",
+    startFailed: "Start failed",
+    stopFailed: "Stop failed",
+    retryFailed: "Retry failed",
+    pendingSuffixFormat: "%s (%d)",
+  },
+  healthMessages: {
+    "capture-engine-stopped": "Audio Input Recovering",
+    "capture-buffer-missing": "Audio Input Warming Up",
+    "capture-buffer-stale": "Audio Input Stalled",
+    default: "Audio Input Not Ready",
+    lowDiskFormat: "Disk Almost Full (%s free)",
+  },
+  timings: {
+    alertDurationSeconds: 0.95,
+    resultPollIntervalSeconds: 0.15,
+    statusWatchdogIntervalSeconds: 2.0,
+    healthWarningThrottleSeconds: 300,
+    replacementWindowSeconds: 15,
+    replacementPasteDelaySeconds: 0.08,
+    warmupDelaySeconds: 0.05,
+    restoreStateDelaySeconds: 0.15,
+  },
+  overlay: {
+    position: "bottom-center",
+    bottomMarginPx: 20,
+    heightPx: 42,
+    widthFastPx: 150,
+    widthRobustPx: 228,
+    dotColorRGBA: [1.0, 0.2, 0.2, 0.9],
+    dotRadiusPx: 7.2,
+    backgroundWhiteAlpha: [0.08, 0.85],
+    labelTextSizePx: 19,
+    cornerRadius: "height/2 (pill)",
+  },
+  behavior: {
+    toggleSemantics:
+      "Command+. starts when idle, stops when recording; stop enqueues transcription",
+    cancelSemantics: "Command+, only acts while recording; otherwise shows No Session",
+    retryRobustWhileRecording: "shows Stop Recording First and does nothing",
+    pasteMechanism:
+      "set clipboard to normalized transcript, then synthetic Command+V; clipboard is NOT restored",
+    undoReplace:
+      "if last dictation paste happened under replacementWindowSeconds ago AND frontmost app is unchanged, send Command+Z, wait replacementPasteDelaySeconds, then paste the robust transcript; otherwise paste normally",
+    emptyNormalizedTranscript: "show No Output, paste nothing",
+    errorResult: "show result.errorMessage as alert, log salvage path if present",
+    pendingCountInAlerts:
+      "while pendingCount > 0, ready/processing alerts append ' (N)' via pendingSuffixFormat",
+  },
+} as const;
+
+export type UxContract = typeof UX_CONTRACT;
+
+export const UX_MILLISECONDS = {
+  alertDuration: UX_CONTRACT.timings.alertDurationSeconds * 1_000,
+  resultPollInterval: UX_CONTRACT.timings.resultPollIntervalSeconds * 1_000,
+  statusWatchdogInterval: UX_CONTRACT.timings.statusWatchdogIntervalSeconds * 1_000,
+  replacementPasteDelay: UX_CONTRACT.timings.replacementPasteDelaySeconds * 1_000,
+  warmupDelay: UX_CONTRACT.timings.warmupDelaySeconds * 1_000,
+  restoreStateDelay: UX_CONTRACT.timings.restoreStateDelaySeconds * 1_000,
+} as const;
+
+export function withPendingCount(label: string, pendingCount: number): string {
+  if (pendingCount <= 0) {
+    return label;
+  }
+  return UX_CONTRACT.alerts.pendingSuffixFormat
+    .replace("%s", label)
+    .replace("%d", String(pendingCount));
+}
