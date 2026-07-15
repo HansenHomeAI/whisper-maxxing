@@ -1,6 +1,14 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
-import { basename, extname, join } from "node:path";
+import {
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  statfs,
+  writeFile,
+} from "node:fs/promises";
+import { basename, dirname, extname, join } from "node:path";
 
 import {
   assessCaptureIntegrity,
@@ -19,6 +27,8 @@ import { errorMessage, TranscriptionError } from "./errors.js";
 import { NodeProcessSpawner } from "./nodeProcessSpawner.js";
 import type {
   Clock,
+  DiskSpaceStatus,
+  DiskStatusProvider,
   FetchResponse,
   HttpFetcher,
   ManagedProcess,
@@ -35,6 +45,8 @@ const VAD_ACTIVATION_MILLISECONDS = 15_000;
 const VAD_MIN_SILENCE_MILLISECONDS = 350;
 const VAD_SPEECH_PAD_MILLISECONDS = 80;
 const MAX_ERROR_MESSAGE_LENGTH = 1_000;
+const LOW_DISK_SPACE_BYTES = 512 * 1024 * 1024;
+const CRITICAL_DISK_SPACE_BYTES = 192 * 1024 * 1024;
 
 interface PendingTranscription {
   capture: StoppedCapture;
@@ -73,6 +85,26 @@ const defaultClock: Clock = {
 const defaultFetcher: HttpFetcher = async (input, init) =>
   fetch(input, init) as Promise<FetchResponse>;
 
+const defaultDiskStatusProvider: DiskStatusProvider = async (path) => {
+  let details;
+  try {
+    details = await statfs(path);
+  } catch {
+    try {
+      details = await statfs(dirname(path));
+    } catch {
+      return null;
+    }
+  }
+  const availableBytes = Number(details.bavail) * Number(details.bsize);
+  return {
+    availableBytes,
+    lowSpace: availableBytes <= LOW_DISK_SPACE_BYTES,
+    criticalSpace: availableBytes <= CRITICAL_DISK_SPACE_BYTES,
+    summary: formatBytes(availableBytes),
+  };
+};
+
 export class TranscriptionManager {
   private readonly config: AppConfig;
   private readonly paths: AppPaths;
@@ -81,7 +113,9 @@ export class TranscriptionManager {
   private readonly processSpawner: ProcessSpawner;
   private readonly clock: Clock;
   private readonly cliEnvironment: NodeJS.ProcessEnv;
+  private readonly diskStatusProvider: DiskStatusProvider;
   private readonly errorReporter: (error: Error) => void;
+  private readonly lifecycle = new AsyncMutex();
   private readonly pending: PendingTranscription[] = [];
   private processing = false;
   private stopped = false;
@@ -102,6 +136,8 @@ export class TranscriptionManager {
     this.processSpawner = dependencies.processSpawner ?? new NodeProcessSpawner();
     this.clock = dependencies.clock ?? defaultClock;
     this.cliEnvironment = dependencies.cliEnvironment ?? process.env;
+    this.diskStatusProvider =
+      dependencies.diskStatusProvider ?? defaultDiskStatusProvider;
     this.errorReporter =
       dependencies.errorReporter ?? ((error) => console.error(error.message));
 
@@ -121,6 +157,7 @@ export class TranscriptionManager {
   }
 
   enqueueRobustRetry(): string {
+    this.assertRunning();
     this.serverConfig("robust");
     if (this.lastRetryableCapture === null) {
       throw TranscriptionError.noRetryableCapture();
@@ -155,8 +192,8 @@ export class TranscriptionManager {
       !process.isRunning() &&
       (state === "starting" || state === "ready")
     ) {
-      this.serverStates.set(profile, "failed");
-      return "failed";
+      this.serverStates.set(profile, "stopped");
+      return "stopped";
     }
     return state;
   }
@@ -179,7 +216,7 @@ export class TranscriptionManager {
       try {
         await this.ensureServerReady(server, this.startupTimeoutSeconds(server));
       } catch (error) {
-        this.serverStates.set(profile, "failed");
+        this.serverStates.set(profile, "stopped");
         this.report(error);
       }
     }
@@ -187,11 +224,13 @@ export class TranscriptionManager {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    for (const profile of ["fast", "robust"] as const) {
-      await this.terminateServerProcess(profile);
-      this.serverProcesses.delete(profile);
-      this.serverStates.set(profile, "stopped");
-    }
+    await this.lifecycle.runExclusive(async () => {
+      for (const profile of ["fast", "robust"] as const) {
+        await this.terminateServerProcess(profile);
+        this.serverProcesses.delete(profile);
+        this.serverStates.set(profile, "stopped");
+      }
+    });
   }
 
   private makePending(capture: StoppedCapture): PendingTranscription {
@@ -213,9 +252,10 @@ export class TranscriptionManager {
     }
     this.processing = true;
     void this.transcribe(next)
-      .catch(async (error: unknown) =>
-        this.failedResult(next, error, null),
-      )
+      .catch(async (error: unknown) => {
+        const diskStatus = await this.currentDiskStatus();
+        return this.failedResult(next, error, diskStatus, null);
+      })
       .then((result) => {
         try {
           this.onCompleted(result);
@@ -236,9 +276,10 @@ export class TranscriptionManager {
       pending.enqueuedAt.getTime() - pending.capture.stoppedAt.getTime();
     const startedAt = this.clock.now();
     const integrity = this.captureIntegrity(pending.capture);
+    const diskStatus = await this.currentDiskStatus();
 
     if (integrity.requiresFailure) {
-      return this.captureIncompleteResult(pending, integrity);
+      return this.captureIncompleteResult(pending, integrity, diskStatus);
     }
     if (pending.capture.signalMetrics.probablySilent) {
       return this.noSpeechResult(
@@ -264,6 +305,7 @@ export class TranscriptionManager {
             assessment,
             startedAt,
             queueWaitMilliseconds,
+            diskStatus,
           );
         }
         return this.acceptedTextResult(
@@ -277,7 +319,7 @@ export class TranscriptionManager {
         );
       }
 
-      if (!this.shouldAttemptCliFallback(pending.capture)) {
+      if (!this.shouldAttemptCliFallback(pending.capture, diskStatus)) {
         return this.noSpeechResult(
           pending.capture,
           this.transcriptionMode("no-speech", pending.capture.transcriptionProfile),
@@ -292,18 +334,16 @@ export class TranscriptionManager {
           cliOutcome,
           startedAt,
           queueWaitMilliseconds,
+          diskStatus,
         );
       } catch (error) {
-        this.report(
-          new Error(
+        return this.failedResult(
+          pending,
+          new TranscriptionError(
             `CLI fallback after no-speech result failed: ${errorMessage(error)}`,
           ),
-        );
-        return this.noSpeechResult(
-          pending.capture,
-          this.transcriptionMode("no-speech", pending.capture.transcriptionProfile),
-          startedAt,
-          queueWaitMilliseconds,
+          diskStatus,
+          null,
         );
       }
     } catch (serverError) {
@@ -314,11 +354,13 @@ export class TranscriptionManager {
           cliOutcome,
           startedAt,
           queueWaitMilliseconds,
+          diskStatus,
         );
       } catch (cliError) {
         return this.failedResult(
           pending,
           TranscriptionError.combined(serverError, cliError),
+          diskStatus,
           null,
         );
       }
@@ -330,6 +372,7 @@ export class TranscriptionManager {
     outcome: TranscriptOutcome,
     startedAt: Date,
     queueWaitMilliseconds: number,
+    diskStatus: DiskSpaceStatus | null,
   ): Promise<SessionResultPayload> {
     if (outcome.kind === "no-speech") {
       return this.noSpeechResult(
@@ -347,6 +390,7 @@ export class TranscriptionManager {
         null,
         outcome.text,
         assessment,
+        diskStatus,
       );
     }
     return this.acceptedTextResult(
@@ -393,6 +437,7 @@ export class TranscriptionManager {
     serverAssessment: TranscriptQualityAssessment,
     startedAt: Date,
     queueWaitMilliseconds: number,
+    diskStatus: DiskSpaceStatus | null,
   ): Promise<SessionResultPayload> {
     try {
       const outcome = await this.transcribeViaCLI(pending);
@@ -403,6 +448,7 @@ export class TranscriptionManager {
           serverText,
           null,
           serverAssessment,
+          diskStatus,
         );
       }
       const cliAssessment = this.qualityAssessment(pending.capture, outcome.text);
@@ -415,6 +461,7 @@ export class TranscriptionManager {
           serverText,
           outcome.text,
           cliAssessment,
+          diskStatus,
         );
       }
       return this.acceptedTextResult(
@@ -436,6 +483,7 @@ export class TranscriptionManager {
         serverText,
         `CLI second pass failed: ${errorMessage(error)}`,
         serverAssessment,
+        diskStatus,
       );
     }
   }
@@ -446,6 +494,7 @@ export class TranscriptionManager {
     serverText: string | null,
     fallbackText: string | null,
     assessment: TranscriptQualityAssessment,
+    diskStatus: DiskSpaceStatus | null,
   ): Promise<SessionResultPayload> {
     const diagnostic: TranscriptDiagnostic = {
       reason,
@@ -467,6 +516,7 @@ export class TranscriptionManager {
       new TranscriptionError(
         "Low-confidence dictation. Audio saved for review.",
       ),
+      diskStatus,
       diagnostic,
     );
   }
@@ -474,6 +524,7 @@ export class TranscriptionManager {
   private async captureIncompleteResult(
     pending: PendingTranscription,
     assessment: CaptureIntegrityAssessment,
+    diskStatus: DiskSpaceStatus | null,
   ): Promise<SessionResultPayload> {
     const reason = assessment.reason ?? "capture-duration-gap";
     const diagnostic: TranscriptDiagnostic = {
@@ -493,6 +544,7 @@ export class TranscriptionManager {
       new TranscriptionError(
         `Audio capture dropped part of this dictation (${reason}). Audio saved for review.`,
       ),
+      diskStatus,
       diagnostic,
     );
   }
@@ -542,9 +594,12 @@ export class TranscriptionManager {
   private async failedResult(
     pending: PendingTranscription,
     error: unknown,
+    diskStatus: DiskSpaceStatus | null,
     diagnostic: TranscriptDiagnostic | null,
   ): Promise<SessionResultPayload> {
-    const message = boundedErrorMessage(error);
+    const message = boundedErrorMessage(
+      this.userFacingErrorMessage(error, diskStatus),
+    );
     const salvagePath = await this.persistSalvage(pending, diagnostic);
     return {
       sessionId: pending.capture.sessionId,
@@ -642,24 +697,37 @@ export class TranscriptionManager {
     server: ServerConfig,
     timeoutSeconds: number,
   ): Promise<void> {
-    if (await this.isServerHealthy(server)) {
+    await this.lifecycle.runExclusive(() =>
+      this.ensureServerReadyLocked(server, timeoutSeconds),
+    );
+  }
+
+  private async ensureServerReadyLocked(
+    server: ServerConfig,
+    timeoutSeconds: number,
+  ): Promise<void> {
+    this.assertRunning();
+    const managed = this.serverProcesses.get(server.profile);
+    if (managed?.isRunning() === true && (await this.isServerHealthy(server))) {
       this.serverStates.set(server.profile, "ready");
       return;
     }
-    const managed = this.serverProcesses.get(server.profile);
+    this.assertRunning();
+    await this.cleanupConflictingServerProcesses(server);
+    this.assertRunning();
     if (managed === undefined || !managed.isRunning()) {
-      await this.cleanupConflictingServerProcesses(server);
       await this.launchServer(server);
     }
     const deadline = this.clock.now().getTime() + timeoutSeconds * 1_000;
     while (this.clock.now().getTime() < deadline) {
+      this.assertRunning();
       if (await this.isServerHealthy(server)) {
         this.serverStates.set(server.profile, "ready");
         return;
       }
       await this.clock.sleep(100);
     }
-    this.serverStates.set(server.profile, "failed");
+    this.serverStates.set(server.profile, "stopped");
     throw new TranscriptionError(
       `${server.profile} whisper-server did not become ready`,
     );
@@ -688,18 +756,35 @@ export class TranscriptionManager {
         server.logPath,
       );
       this.serverProcesses.set(server.profile, process);
+      if (this.stopped) {
+        await this.terminateServerProcess(server.profile);
+        this.serverProcesses.delete(server.profile);
+        this.serverStates.set(server.profile, "stopped");
+        throw new TranscriptionError("The transcription manager is stopped.");
+      }
     } catch (error) {
-      this.serverStates.set(server.profile, "failed");
+      this.serverStates.set(server.profile, "stopped");
       throw error;
     }
   }
 
   private async restartServer(profile: TranscriptionProfile): Promise<void> {
+    await this.lifecycle.runExclusive(() => this.restartServerLocked(profile));
+  }
+
+  private async restartServerLocked(
+    profile: TranscriptionProfile,
+  ): Promise<void> {
+    this.assertRunning();
     await this.terminateServerProcess(profile);
     this.serverProcesses.delete(profile);
     this.serverStates.set(profile, "stopped");
+    this.assertRunning();
     const server = this.serverConfig(profile);
-    await this.ensureServerReady(server, this.startupTimeoutSeconds(server));
+    await this.ensureServerReadyLocked(
+      server,
+      this.startupTimeoutSeconds(server),
+    );
   }
 
   private async terminateServerProcess(
@@ -757,18 +842,35 @@ export class TranscriptionManager {
       }
       if (this.processSpawner.processIsRunning(process.pid)) {
         await this.processSpawner.terminatePid(process.pid, true);
+        const forceDeadline = this.clock.now().getTime() + 500;
+        while (
+          this.processSpawner.processIsRunning(process.pid) &&
+          this.clock.now().getTime() < forceDeadline
+        ) {
+          await this.clock.sleep(25);
+        }
+        if (this.processSpawner.processIsRunning(process.pid)) {
+          throw new TranscriptionError(
+            `Unable to terminate stale whisper-server pid=${process.pid}`,
+          );
+        }
       }
     }
   }
 
   private isExpectedServerCommand(command: string, server: ServerConfig): boolean {
-    const binary = basename(this.config.whisperServerBinary);
-    const model = basename(server.modelPath);
+    const tokens = commandLineTokens(command);
+    const modelIndex = tokens.indexOf("-m");
+    const portIndex = tokens.indexOf("--port");
+    const executable = tokens[0];
+    const model = modelIndex >= 0 ? tokens[modelIndex + 1] : undefined;
+    const port = portIndex >= 0 ? tokens[portIndex + 1] : undefined;
     return (
-      (command.includes(this.config.whisperServerBinary) ||
-        command.includes(binary)) &&
-      (command.includes(server.modelPath) || command.includes(model)) &&
-      command.includes(`--port ${server.port}`)
+      executable !== undefined &&
+      model !== undefined &&
+      matchesPathComponent(executable, this.config.whisperServerBinary) &&
+      matchesPathComponent(model, server.modelPath) &&
+      port === String(server.port)
     );
   }
 
@@ -790,7 +892,7 @@ export class TranscriptionManager {
       try {
         return await this.transcribeViaServer(retryServer, pending);
       } catch (error) {
-        this.serverStates.set(server.profile, "failed");
+        this.serverStates.set(server.profile, "stopped");
         throw error;
       }
     }
@@ -819,15 +921,11 @@ export class TranscriptionManager {
       }),
       basename(pending.wavPath),
     );
-    const response = await this.fetchWithTimeout(
+    const payload = await this.fetchJSONWithTimeout(
       `http://${this.config.whisperServerHost}:${server.port}/inference`,
       { method: "POST", body: form },
       server.requestTimeoutSeconds,
     );
-    if (!response.ok) {
-      throw TranscriptionError.serverHTTP(response.status);
-    }
-    const payload = await response.json();
     const text =
       typeof payload === "object" &&
       payload !== null &&
@@ -905,22 +1003,40 @@ export class TranscriptionManager {
     }
   }
 
-  private async fetchWithTimeout(
+  private async fetchJSONWithTimeout(
     url: string,
     init: RequestInit,
     timeoutSeconds: number,
-  ): Promise<FetchResponse> {
+  ): Promise<unknown> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutSeconds * 1_000);
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    const timedOut = new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(() => {
+        controller.abort();
+        reject(TranscriptionError.serverTimeout(timeoutSeconds));
+      }, timeoutSeconds * 1_000);
+    });
+    const request = async (): Promise<unknown> => {
+      const response = await this.fetcher(url, {
+        ...init,
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        throw TranscriptionError.serverHTTP(response.status);
+      }
+      return response.json();
+    };
     try {
-      return await this.fetcher(url, { ...init, signal: controller.signal });
+      return await Promise.race([request(), timedOut]);
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (controller.signal.aborted && !(error instanceof TranscriptionError)) {
         throw TranscriptionError.serverTimeout(timeoutSeconds);
       }
       throw error;
     } finally {
-      clearTimeout(timeout);
+      if (timeout !== null) {
+        clearTimeout(timeout);
+      }
     }
   }
 
@@ -944,8 +1060,35 @@ export class TranscriptionManager {
     return server.profile === "robust" ? server.requestTimeoutSeconds : 15;
   }
 
-  private shouldAttemptCliFallback(capture: StoppedCapture): boolean {
-    return this.audioDurationMilliseconds(capture) >= 1_500;
+  private shouldAttemptCliFallback(
+    capture: StoppedCapture,
+    diskStatus: DiskSpaceStatus | null,
+  ): boolean {
+    return (
+      diskStatus?.criticalSpace !== true &&
+      this.audioDurationMilliseconds(capture) >= 1_500
+    );
+  }
+
+  private async currentDiskStatus(): Promise<DiskSpaceStatus | null> {
+    try {
+      return await this.diskStatusProvider(this.paths.tempDirectory);
+    } catch {
+      return null;
+    }
+  }
+
+  private userFacingErrorMessage(
+    error: unknown,
+    diskStatus: DiskSpaceStatus | null,
+  ): string {
+    if (
+      diskStatus !== null &&
+      (diskStatus.criticalSpace || isOutOfDiskSpace(error))
+    ) {
+      return `Disk Almost Full (${diskStatus.summary} free)`;
+    }
+    return errorMessage(error);
   }
 
   private async resolvedVadModelPath(): Promise<string | null> {
@@ -1061,6 +1204,12 @@ export class TranscriptionManager {
     }
   }
 
+  private assertRunning(): void {
+    if (this.stopped) {
+      throw new TranscriptionError("The transcription manager is stopped.");
+    }
+  }
+
   private report(error: unknown): void {
     this.errorReporter(
       error instanceof Error ? error : new Error(errorMessage(error)),
@@ -1137,6 +1286,82 @@ function boundedErrorMessage(error: unknown): string {
     return message;
   }
   return `${message.slice(0, MAX_ERROR_MESSAGE_LENGTH - 1)}…`;
+}
+
+function isOutOfDiskSpace(error: unknown): boolean {
+  if (
+    error instanceof Error &&
+    (error as NodeJS.ErrnoException).code === "ENOSPC"
+  ) {
+    return true;
+  }
+  const description = errorMessage(error).toLowerCase();
+  return (
+    description.includes("no space") ||
+    description.includes("disk is full") ||
+    description.includes("enospc")
+  );
+}
+
+function commandLineTokens(command: string): string[] {
+  const tokens: string[] = [];
+  const expression = /"([^"]*)"|'([^']*)'|([^\s]+)/gu;
+  for (const match of command.matchAll(expression)) {
+    const token = match[1] ?? match[2] ?? match[3];
+    if (token !== undefined) {
+      tokens.push(token);
+    }
+  }
+  return tokens;
+}
+
+function matchesPathComponent(candidate: string, expected: string): boolean {
+  const normalizedCandidate = normalizePath(candidate);
+  const normalizedExpected = normalizePath(expected);
+  return (
+    normalizedCandidate === normalizedExpected ||
+    pathComponent(normalizedCandidate) === pathComponent(normalizedExpected)
+  );
+}
+
+function normalizePath(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function pathComponent(path: string): string {
+  return path.slice(path.lastIndexOf("/") + 1);
+}
+
+function formatBytes(bytes: number): string {
+  const units = ["bytes", "kB", "MB", "GB", "TB"];
+  let value = Math.max(bytes, 0);
+  let index = 0;
+  while (value >= 1_000 && index < units.length - 1) {
+    value /= 1_000;
+    index += 1;
+  }
+  const digits = value >= 10 || index === 0 ? 0 : 1;
+  return `${value.toFixed(digits)} ${units[index]}`;
+}
+
+class AsyncMutex {
+  private tail: Promise<void> = Promise.resolve();
+
+  async runExclusive<T>(action: () => Promise<T>): Promise<T> {
+    const previous = this.tail;
+    let release = (): void => undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.tail = previous.then(() => gate);
+    await previous;
+    try {
+      return await action();
+    } finally {
+      release();
+    }
+  }
 }
 
 export { normalizeTranscript };

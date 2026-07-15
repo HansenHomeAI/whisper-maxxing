@@ -84,6 +84,32 @@ describe("whisper-server lifecycle", () => {
     expect(harness.manager.currentServerState("fast")).toBe("ready");
   });
 
+  it("force-kills a stale server and verifies it exited", async () => {
+    const port = await reservePort();
+    const server = new FakeWhisperServer();
+    const spawner = new LifecycleSpawner(
+      server,
+      [
+        {
+          pid: 93,
+          command:
+            `/fake/whisper-server -m /models/fast.bin --port ${port}`,
+        },
+      ],
+      true,
+    );
+    const harness = await lifecycleHarness(port, spawner);
+
+    await harness.manager.prewarmServerIfNeeded();
+
+    expect(spawner.terminated).toEqual([
+      { pid: 93, force: false },
+      { pid: 93, force: true },
+    ]);
+    expect(spawner.processIsRunning(93)).toBe(false);
+    expect(harness.manager.currentServerState("fast")).toBe("ready");
+  });
+
   it("refuses to kill an unrelated listener and exposes failure", async () => {
     const port = await reservePort();
     const server = new FakeWhisperServer();
@@ -96,10 +122,66 @@ describe("whisper-server lifecycle", () => {
 
     expect(spawner.terminated).toEqual([]);
     expect(spawner.spawns).toEqual([]);
-    expect(harness.manager.currentServerState("fast")).toBe("failed");
+    expect(harness.manager.currentServerState("fast")).toBe("stopped");
     expect(harness.reportedErrors[0]?.message).toContain(
       `Port ${port} is already used by another process`,
     );
+  });
+
+  it("does not accept basename substrings as owned processes", async () => {
+    const port = await reservePort();
+    const server = new FakeWhisperServer();
+    const spawner = new LifecycleSpawner(server, [
+      {
+        pid: 94,
+        command:
+          `/fake/whisper-server-evil -m /models/fast.bin.evil --port ${port}`,
+      },
+    ]);
+    const harness = await lifecycleHarness(port, spawner);
+
+    await harness.manager.prewarmServerIfNeeded();
+
+    expect(spawner.terminated).toEqual([]);
+    expect(spawner.spawns).toEqual([]);
+    expect(harness.manager.currentServerState("fast")).toBe("stopped");
+  });
+
+  it("serializes concurrent prewarm and enqueue without double spawn", async () => {
+    const port = await reservePort();
+    const server = new FakeWhisperServer([
+      { kind: "transcript", text: `serialized-${crypto.randomUUID()}` },
+    ]);
+    const spawner = new LifecycleSpawner(server);
+    const harness = await lifecycleHarness(port, spawner);
+
+    const firstPrewarm = harness.manager.prewarmServerIfNeeded();
+    const secondPrewarm = harness.manager.prewarmServerIfNeeded();
+    harness.manager.enqueue(capture("concurrent-enqueue"));
+    await Promise.all([firstPrewarm, secondPrewarm]);
+    await waitForResults(harness.results, 1);
+
+    expect(spawner.spawns).toHaveLength(1);
+    expect(harness.results).toHaveLength(1);
+    expect(harness.manager.currentServerState("fast")).toBe("ready");
+  });
+
+  it("does not spawn or relaunch when stop races prewarm and enqueue", async () => {
+    const port = await reservePort();
+    const server = new FakeWhisperServer();
+    const spawner = new LifecycleSpawner(server);
+    const harness = await lifecycleHarness(port, spawner);
+
+    const prewarm = harness.manager.prewarmServerIfNeeded();
+    harness.manager.enqueue(capture("stop-race"));
+    const stop = harness.manager.stop();
+    await Promise.all([prewarm, stop]);
+    await waitForResults(harness.results, 1);
+
+    expect(spawner.spawns).toHaveLength(0);
+    expect(server.isListening).toBe(false);
+    expect(harness.manager.currentServerState("fast")).toBe("stopped");
+    expect(harness.results[0]?.errorMessage).toBeTypeOf("string");
   });
 });
 
@@ -111,6 +193,7 @@ class LifecycleSpawner implements ProcessSpawner {
   constructor(
     private readonly server: FakeWhisperServer,
     private readonly conflicts: ListeningProcess[] = [],
+    private readonly ignoreGracefulTermination = false,
   ) {
     conflicts.forEach((process) => this.runningPids.add(process.pid));
   }
@@ -141,7 +224,9 @@ class LifecycleSpawner implements ProcessSpawner {
 
   async terminatePid(pid: number, force: boolean): Promise<void> {
     this.terminated.push({ pid, force });
-    this.runningPids.delete(pid);
+    if (force || !this.ignoreGracefulTermination) {
+      this.runningPids.delete(pid);
+    }
   }
 
   processIsRunning(pid: number): boolean {

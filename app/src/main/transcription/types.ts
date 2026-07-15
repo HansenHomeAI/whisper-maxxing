@@ -21,7 +21,18 @@ export interface StoppedCapture {
   signalMetrics: AudioSignalMetrics;
 }
 
-export type ServerState = "stopped" | "starting" | "ready" | "failed";
+export type ServerState = "stopped" | "starting" | "ready";
+
+export interface DiskSpaceStatus {
+  availableBytes: number;
+  lowSpace: boolean;
+  criticalSpace: boolean;
+  summary: string;
+}
+
+export type DiskStatusProvider = (
+  path: string,
+) => DiskSpaceStatus | null | Promise<DiskSpaceStatus | null>;
 
 export interface Clock {
   now(): Date;
@@ -87,6 +98,7 @@ export interface TranscriptionManagerDependencies {
   processSpawner?: ProcessSpawner;
   clock?: Clock;
   cliEnvironment?: NodeJS.ProcessEnv;
+  diskStatusProvider?: DiskStatusProvider;
   errorReporter?: (error: Error) => void;
 }
 

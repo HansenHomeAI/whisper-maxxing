@@ -11,8 +11,15 @@ import {
   type SessionResultPayload,
 } from "../../src/core/index.js";
 import {
+  NodeProcessSpawner,
   TranscriptionManager,
+  type ListeningProcess,
+  type ManagedProcess,
+  type ProcessRunOptions,
+  type ProcessRunResult,
+  type ProcessSpawner,
   type StoppedCapture,
+  type TranscriptionManagerDependencies,
 } from "../../src/main/transcription/index.js";
 import {
   FakeWhisperServer,
@@ -33,10 +40,12 @@ interface Harness {
 const servers: FakeWhisperServer[] = [];
 const managers: TranscriptionManager[] = [];
 const roots: string[] = [];
+const serversByPort = new Map<number, FakeWhisperServer>();
 
 afterEach(async () => {
   await Promise.all(managers.splice(0).map((manager) => manager.stop()));
   await Promise.all(servers.splice(0).map((server) => server.close()));
+  serversByPort.clear();
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
   );
@@ -64,6 +73,15 @@ describe("TranscriptionManager reliability ladder", () => {
       },
     });
     expect(server.inferenceRequestCount).toBe(1);
+    const inference = server.requests.find(
+      (request) => request.url === "/inference",
+    );
+    expect(inference).toBeDefined();
+    const riffOffset = inference?.body.indexOf(Buffer.from("RIFF")) ?? -1;
+    expect(riffOffset).toBeGreaterThanOrEqual(0);
+    expect(inference?.body.subarray(riffOffset + 8, riffOffset + 12).toString("ascii"))
+      .toBe("WAVE");
+    expect(inference?.body.readUInt32LE(riffOffset + 4)).toBe(44 + 64_000 - 8);
     expect(harness.manager.currentServerState("fast")).toBe("ready");
     expect(harness.manager.currentServerState("robust")).toBe("stopped");
   });
@@ -87,7 +105,30 @@ describe("TranscriptionManager reliability ladder", () => {
       metrics: { transcriptionMode: "cli" },
     });
     expect(server.inferenceRequestCount).toBe(2);
-    expect(harness.manager.currentServerState("fast")).toBe("failed");
+    expect(harness.manager.currentServerState("fast")).toBe("stopped");
+  });
+
+  it("keeps the timeout active while reading a stalled response body", async () => {
+    const nonce = `cli-body-timeout-${crypto.randomUUID()}`;
+    const server = await startServer(
+      { kind: "headers-then-hang" },
+      { kind: "headers-then-hang" },
+    );
+    const harness = await createHarness(
+      server,
+      { serverRequestTimeoutSeconds: 0.05 },
+      [{ kind: "transcript", text: nonce }],
+    );
+
+    harness.manager.enqueue(capture("body-timeout"));
+    await waitForResults(harness.results, 1);
+
+    expect(harness.results[0]).toMatchObject({
+      text: nonce,
+      errorMessage: null,
+      metrics: { transcriptionMode: "cli" },
+    });
+    expect(server.inferenceRequestCount).toBe(2);
   });
 
   it("falls back after refused server connections", async () => {
@@ -105,6 +146,32 @@ describe("TranscriptionManager reliability ladder", () => {
 
     expect(harness.results[0]?.text).toBe(nonce);
     expect(harness.results[0]?.metrics.transcriptionMode).toBe("cli");
+  });
+
+  it("never sends audio to an unowned healthy HTTP listener", async () => {
+    const serverNonce = `unowned-${crypto.randomUUID()}`;
+    const cliNonce = `safe-cli-${crypto.randomUUID()}`;
+    const server = await startServer({
+      kind: "transcript",
+      text: serverNonce,
+    });
+    const unowned = new UnownedHealthyProcessSpawner();
+    const harness = await createHarness(
+      server,
+      {},
+      [{ kind: "transcript", text: cliNonce }],
+      { processSpawner: unowned },
+    );
+
+    harness.manager.enqueue(capture("unowned-listener"));
+    await waitForResults(harness.results, 1);
+
+    expect(server.inferenceRequestCount).toBe(0);
+    expect(unowned.terminated).toBe(false);
+    expect(harness.results[0]).toMatchObject({
+      text: cliNonce,
+      metrics: { transcriptionMode: "cli" },
+    });
   });
 
   it("surfaces combined failure and persists salvage WAV", async () => {
@@ -332,6 +399,104 @@ describe("TranscriptionManager reliability ladder", () => {
     });
   });
 
+  it("surfaces no-speech CLI failure with salvage", async () => {
+    const server = await startServer({ kind: "no-speech" });
+    const harness = await createHarness(server, {}, [
+      { kind: "error", message: "no-speech-cli-failed" },
+    ]);
+
+    harness.manager.enqueue(capture("no-speech-cli-failure"));
+    await waitForResults(harness.results, 1);
+
+    const result = requiredResult(harness.results, 0);
+    expect(result.errorMessage).toContain(
+      "CLI fallback after no-speech result failed",
+    );
+    expect(result.errorMessage).toContain("no-speech-cli-failed");
+    expect(result.salvagePath).toBeTypeOf("string");
+    expect(result.metrics.transcriptionMode).toBe("failed");
+  });
+
+  it("maps critical disk failures to Disk Almost Full", async () => {
+    const server = await startServer(
+      { kind: "http-error", status: 500 },
+      { kind: "http-error", status: 500 },
+    );
+    const harness = await createHarness(
+      server,
+      {},
+      [{ kind: "error", message: "ordinary CLI failure" }],
+      {
+        diskStatusProvider: () => ({
+          availableBytes: 180 * 1024 * 1024,
+          lowSpace: true,
+          criticalSpace: true,
+          summary: "180 MB",
+        }),
+      },
+    );
+
+    harness.manager.enqueue(capture("critical-disk"));
+    await waitForResults(harness.results, 1);
+
+    expect(harness.results[0]?.errorMessage).toBe(
+      "Disk Almost Full (180 MB free)",
+    );
+  });
+
+  it("maps ENOSPC failures to Disk Almost Full", async () => {
+    const server = await startServer(
+      { kind: "http-error", status: 500 },
+      { kind: "http-error", status: 500 },
+    );
+    const harness = await createHarness(
+      server,
+      {},
+      [{ kind: "error", message: "ENOSPC: no space left on device" }],
+      {
+        diskStatusProvider: () => ({
+          availableBytes: 2_000_000_000,
+          lowSpace: false,
+          criticalSpace: false,
+          summary: "2 GB",
+        }),
+      },
+    );
+
+    harness.manager.enqueue(capture("enospc"));
+    await waitForResults(harness.results, 1);
+
+    expect(harness.results[0]?.errorMessage).toBe(
+      "Disk Almost Full (2 GB free)",
+    );
+  });
+
+  it("does not run no-speech CLI fallback at critical disk level", async () => {
+    const server = await startServer({ kind: "no-speech" });
+    const harness = await createHarness(
+      server,
+      {},
+      [{ kind: "error", message: "must-not-run" }],
+      {
+        diskStatusProvider: () => ({
+          availableBytes: 100,
+          lowSpace: true,
+          criticalSpace: true,
+          summary: "100 bytes",
+        }),
+      },
+    );
+
+    harness.manager.enqueue(capture("critical-no-speech"));
+    await waitForResults(harness.results, 1);
+
+    expect(harness.results[0]).toMatchObject({
+      text: "",
+      errorMessage: null,
+      metrics: { transcriptionMode: "no-speech" },
+    });
+  });
+
   it("persists successful audio only when explicitly enabled", async () => {
     const nonce = `recent-${crypto.randomUUID()}`;
     const server = await startServer({ kind: "transcript", text: nonce });
@@ -382,6 +547,7 @@ async function startServer(
   const server = new FakeWhisperServer(scenarios);
   await server.start();
   servers.push(server);
+  serversByPort.set(server.port, server);
   return server;
 }
 
@@ -389,6 +555,7 @@ async function createHarness(
   server: FakeWhisperServer,
   overrides: Partial<AppConfig> = {},
   cliScenarios: unknown[] = [],
+  dependencies: TranscriptionManagerDependencies = {},
 ): Promise<Harness> {
   const root = await mkdtemp(join(tmpdir(), "whisper-pipeline-"));
   roots.push(root);
@@ -405,12 +572,139 @@ async function createHarness(
       cliEnvironment: {
         ...process.env,
         FAKE_WHISPER_CLI_SCENARIO_FILE: cliScenarioPath,
+        FAKE_WHISPER_CLI_EXPECTED_MODEL: "/models/fast.bin",
       },
+      processSpawner: new FakeServerProcessSpawner(config),
       errorReporter: (error) => reportedErrors.push(error),
+      ...dependencies,
     },
   });
   managers.push(manager);
   return { root, manager, results, reportedErrors };
+}
+
+class FakeServerProcessSpawner implements ProcessSpawner {
+  private readonly delegate = new NodeProcessSpawner();
+
+  constructor(private readonly config: AppConfig) {}
+
+  async spawnServer(
+    _command: string,
+    args: readonly string[],
+    _logPath: string,
+  ): Promise<ManagedProcess> {
+    const portIndex = args.indexOf("--port");
+    const port = Number(args[portIndex + 1]);
+    const server = serversByPort.get(port);
+    if (server === undefined) {
+      throw new Error(`No fake whisper server registered on port ${port}`);
+    }
+    await server.start(port);
+    return new FakeServerManagedProcess(server, processId(port));
+  }
+
+  async run(
+    command: string,
+    args: readonly string[],
+    options: ProcessRunOptions,
+  ): Promise<ProcessRunResult> {
+    return this.delegate.run(command, args, options);
+  }
+
+  async listeningProcesses(port: number): Promise<ListeningProcess[]> {
+    const server = serversByPort.get(port);
+    if (server?.isListening !== true) {
+      return [];
+    }
+    const model =
+      port === this.config.whisperServerPort
+        ? this.config.whisperModelPath
+        : this.config.whisperRobustModelPath;
+    return [
+      {
+        pid: processId(port),
+        command:
+          `${this.config.whisperServerBinary} -m ${model} ` +
+          `--host ${this.config.whisperServerHost} --port ${port}`,
+      },
+    ];
+  }
+
+  async terminatePid(pid: number, _force: boolean): Promise<void> {
+    const server = serversByPort.get(portFromProcessId(pid));
+    await server?.close();
+  }
+
+  processIsRunning(pid: number): boolean {
+    return serversByPort.get(portFromProcessId(pid))?.isListening === true;
+  }
+}
+
+class UnownedHealthyProcessSpawner implements ProcessSpawner {
+  private readonly delegate = new NodeProcessSpawner();
+  terminated = false;
+
+  async spawnServer(): Promise<ManagedProcess> {
+    throw new Error("An unowned listener must prevent server launch");
+  }
+
+  async run(
+    command: string,
+    args: readonly string[],
+    options: ProcessRunOptions,
+  ): Promise<ProcessRunResult> {
+    return this.delegate.run(command, args, options);
+  }
+
+  async listeningProcesses(_port: number): Promise<ListeningProcess[]> {
+    return [{ pid: 77, command: "node unrelated-health-service.mjs" }];
+  }
+
+  async terminatePid(): Promise<void> {
+    this.terminated = true;
+  }
+
+  processIsRunning(): boolean {
+    return true;
+  }
+}
+
+class FakeServerManagedProcess implements ManagedProcess {
+  readonly command = "/unused/whisper-server";
+  private closePromise: Promise<void> | null = null;
+
+  constructor(
+    private readonly server: FakeWhisperServer,
+    readonly pid: number,
+  ) {}
+
+  isRunning(): boolean {
+    return this.server.isListening;
+  }
+
+  terminate(): void {
+    this.close();
+  }
+
+  kill(): void {
+    this.close();
+  }
+
+  async waitForExit(): Promise<void> {
+    await this.closePromise;
+  }
+
+  private close(): void {
+    this.closePromise ??= this.server.close();
+  }
+}
+
+function processId(port: number): number {
+  return 100_000 + port;
+}
+
+function portFromProcessId(pid: number): number {
+  return pid - 100_000;
 }
 
 function makeConfig(

@@ -15,6 +15,39 @@ if (!Array.isArray(scenarios) || scenarios.length === 0) {
   process.exit(2);
 }
 const [scenario, ...remaining] = scenarios;
+
+const argument = (flag) => {
+  const index = process.argv.indexOf(flag);
+  return index >= 0 ? process.argv[index + 1] : undefined;
+};
+const modelPath = argument("-m");
+const wavPath = argument("-f");
+const expectedModel = scenario.expectedModel ?? process.env.FAKE_WHISPER_CLI_EXPECTED_MODEL;
+if (!modelPath || !wavPath || !process.argv.includes("-nt") || !process.argv.includes("-np")) {
+  process.stderr.write("Expected whisper-cli -m/-f/-nt/-np arguments\n");
+  process.exit(3);
+}
+if (!expectedModel || modelPath !== expectedModel) {
+  process.stderr.write(`Unexpected model: ${modelPath}; expected: ${expectedModel ?? "(unset)"}\n`);
+  process.exit(3);
+}
+let wav;
+try {
+  wav = await readFile(wavPath);
+} catch (error) {
+  process.stderr.write(`Unable to open WAV input: ${error.message}\n`);
+  process.exit(3);
+}
+if (
+  wav.length < 44 ||
+  wav.subarray(0, 4).toString("ascii") !== "RIFF" ||
+  wav.subarray(8, 12).toString("ascii") !== "WAVE" ||
+  wav.readUInt32LE(4) !== wav.length - 8
+) {
+  process.stderr.write("Input is not a complete RIFF/WAVE file\n");
+  process.exit(3);
+}
+
 await writeFile(scenarioPath, `${JSON.stringify(remaining)}\n`, "utf8");
 
 if (scenario.kind === "delay") {

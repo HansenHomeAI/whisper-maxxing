@@ -7,6 +7,7 @@ export type FakeWhisperScenario =
   | { kind: "no-speech" }
   | { kind: "delay"; milliseconds: number; text: string }
   | { kind: "http-error"; status: number; body?: string }
+  | { kind: "headers-then-hang" }
   | { kind: "hang" }
   | { kind: "refuse-connection" };
 
@@ -40,6 +41,10 @@ export class FakeWhisperServer {
 
   get inferenceRequestCount(): number {
     return this.requests.filter((request) => request.url === "/inference").length;
+  }
+
+  get isListening(): boolean {
+    return this.server !== null;
   }
 
   async start(port = 0): Promise<void> {
@@ -114,6 +119,11 @@ export class FakeWhisperServer {
       case "http-error":
         response.writeHead(scenario.status, { "content-type": "text/plain" });
         response.end(scenario.body ?? "scripted error");
+        return;
+      case "headers-then-hang":
+        response.writeHead(200, { "content-type": "application/json" });
+        response.flushHeaders();
+        response.write('{"text":"never finishes');
         return;
       case "hang":
         return;
