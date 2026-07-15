@@ -1,17 +1,15 @@
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
   app,
   globalShortcut,
+  shell,
   type Tray,
 } from "electron";
 
 import {
-  parseAppConfig,
   sendJSONSocketRequest,
-  type AppConfig,
 } from "../core/index.js";
 import {
   CaptureEngine,
@@ -19,10 +17,15 @@ import {
 } from "./capture/index.js";
 import { ElectronDaemon } from "./daemon.js";
 import {
+  ensureFirstRunConfig,
+  openMacPermissionSettings,
+} from "./firstRun.js";
+import {
   registerSettingsHistory,
   type SettingsHistoryRegistration,
 } from "./history/index.js";
 import { createTray } from "./tray.js";
+import { configureLaunchAtLogin } from "./loginItem.js";
 import {
   DictationController,
   OverlayWindow,
@@ -60,7 +63,15 @@ async function startApplication(): Promise<void> {
   app.setName("WhisperDictation");
   await app.whenReady();
 
-  const config = await loadConfig();
+  const explicitConfigPath = process.env.WD_CONFIG?.trim();
+  const firstRun = await ensureFirstRunConfig(
+    explicitConfigPath ? { configPath: explicitConfigPath } : {},
+  );
+  const config = firstRun.config;
+  configureLaunchAtLogin(app, config);
+  if (firstRun.created && process.platform === "darwin") {
+    await guideMacPermissions();
+  }
   const overlay = new OverlayWindow({ rendererUrl: rendererUrl("overlay") });
   const reportError = (error: Error): void => {
     console.error(error);
@@ -161,23 +172,10 @@ async function shutdown(): Promise<void> {
   await current.daemon.dispose();
 }
 
-async function loadConfig(): Promise<AppConfig> {
-  const configPath =
-    process.env.WD_CONFIG?.trim() || defaultConfigPath(process.platform);
-  return parseAppConfig(JSON.parse(await readFile(configPath, "utf8")) as unknown);
-}
-
-function defaultConfigPath(platform: NodeJS.Platform): string {
-  if (platform === "darwin") {
-    return path.join(
-      app.getPath("home"),
-      "Library",
-      "Application Support",
-      "WhisperDictation",
-      "config.json",
-    );
-  }
-  return path.join(app.getPath("appData"), "WhisperDictation", "config.json");
+async function guideMacPermissions(): Promise<void> {
+  const openExternal = (url: string): Promise<void> => shell.openExternal(url);
+  await openMacPermissionSettings("microphone", openExternal);
+  await openMacPermissionSettings("accessibility", openExternal);
 }
 
 function rendererUrl(page: "overlay" | "settings"): string {

@@ -240,6 +240,10 @@ and remains the author's daily driver until sign-off.
   npm's `npm_node_execpath`, and only then `process.execPath`. Electron's `process.execPath`
   is the app executable rather than Node, so this explicit runner keeps the same real child
   process and HTTP behavior on macOS and Windows without adding a test-only transport.
+- D20: Application startup always resolves configuration through the first-run service,
+  including explicit `WD_CONFIG` paths, then applies the config's launch-at-login setting.
+  A newly created macOS config opens the native Microphone and Accessibility privacy panes
+  through their direct System Settings links before capture starts.
 
 ## Pathfinder findings
 
