@@ -221,6 +221,12 @@ and remains the author's daily driver until sign-off.
   `src/renderer/overlay/index.html` is present. Overlay E2E must load that production
   artifact through the real `OverlayWindow` and control path; a test-only renderer or
   direct render call is not UX proof.
+- D16: AudioWorklet frames transfer their `ArrayBuffer` ownership to the capture preload
+  with the DOM MessagePort transfer list, and the preload forwards the frame to Electron
+  main by value. Electron 43's cross-process MessagePort bridge only accepts ports in its
+  transfer list; attempting to transfer an `ArrayBuffer` there hangs the pinned runtime.
+  Capture E2E therefore proves actual worklet-sender detachment plus intact PCM receipt in
+  main, without a synthetic local `structuredClone` detachment.
 
 ## Pathfinder findings
 
