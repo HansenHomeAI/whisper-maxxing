@@ -244,6 +244,10 @@ and remains the author's daily driver until sign-off.
   including explicit `WD_CONFIG` paths, then applies the config's launch-at-login setting.
   A newly created macOS config opens the native Microphone and Accessibility privacy panes
   through their direct System Settings links before capture starts.
+- D21: The primary Electron CI matrix is the cross-platform acceptance surface, not a
+  unit-only smoke job. Both macOS and Windows run every TypeScript suite, renderer E2E,
+  black-box protocol suite, and 50-cycle soak; the Windows leg also executes the Pester
+  bootstrap contract. Packaging remains a separate two-OS artifact matrix.
 
 ## Pathfinder findings
 

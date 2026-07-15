@@ -25,6 +25,24 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run test:unit
+      - run: npm run test:pipeline
+      - run: npm run test:capture
+      - run: npm run test:ux
+      - run: npm run test:settings
+      - run: npm run e2e:settings
+      - run: npm run e2e:overlay
+      - run: npm run e2e:capture-smoke
+      - run: npm run e2e:protocol
+      - run: npm run soak
+        env:
+          SOAK_CYCLES: 50
+      - name: Test Windows whisper bootstrap
+        if: runner.os == 'Windows'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          Install-Module Pester -Force -Scope CurrentUser -MinimumVersion 5.0
+          Invoke-Pester -Path scripts/setup-whisper-windows.Tests.ps1 -Output Detailed
 
   swift:
     name: Swift (macos-14)
