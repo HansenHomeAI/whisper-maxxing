@@ -121,24 +121,38 @@ export class DictationController {
       profile === "robust" ? UX_CONTRACT.alerts.startingRobust : UX_CONTRACT.alerts.starting,
     );
 
+    let response: ControlResponse;
     try {
-      const response = await this.controlClient.send({
+      response = await this.controlClient.send({
         command: profile === "robust" ? "startRobust" : "start",
       });
       if (!response.ok) {
         throw new Error(response.error ?? UX_CONTRACT.alerts.startFailed);
       }
-      this.state = "recording";
-      this.profile = profile;
-      await this.overlay.showRecording(profile);
-      await this.maybeWarnAboutStatus(response.status);
-      await this.showAlert(this.recordingLabel(profile));
     } catch (error) {
       this.state = "idle";
       this.profile = "fast";
-      await this.overlay.hideRecording();
+      try {
+        await this.overlay.hideRecording();
+      } catch (hideError) {
+        this.logger.error(
+          `dictation overlay hide error: ${errorMessage(hideError, "Overlay failed")}`,
+        );
+      }
       await this.showAlert(errorMessage(error, UX_CONTRACT.alerts.startFailed));
+      return;
     }
+
+    this.state = "recording";
+    this.profile = profile;
+    try {
+      await this.overlay.showRecording(profile);
+    } catch (error) {
+      await this.surfaceOperationalError("dictation overlay show error", error);
+      return;
+    }
+    await this.maybeWarnAboutStatus(response.status);
+    await this.showAlert(this.recordingLabel(profile));
   }
 
   async stopRecording(discard: boolean): Promise<void> {
@@ -249,8 +263,15 @@ export class DictationController {
       if (!this.acceptStatusObservation(observation)) {
         return;
       }
+      const reconciled = await this.reconcileRecordingState(
+        response.status,
+        true,
+        observation,
+      );
+      if (!reconciled) {
+        return;
+      }
       this.pendingCount = response.pendingCount ?? response.status.pendingCount;
-      await this.reconcileRecordingState(response.status, true);
       await this.maybeWarnAboutStatus(response.status);
       if (this.pendingCount > 0) {
         this.ensureResultPolling();
@@ -273,8 +294,15 @@ export class DictationController {
       if (!this.acceptStatusObservation(observation)) {
         return;
       }
+      const reconciled = await this.reconcileRecordingState(
+        response.status,
+        false,
+        observation,
+      );
+      if (!reconciled) {
+        return;
+      }
       this.pendingCount = response.pendingCount ?? response.status.pendingCount;
-      await this.reconcileRecordingState(response.status, false);
       await this.maybeWarnAboutStatus(response.status);
       if (this.pendingCount > 0) {
         this.ensureResultPolling();
@@ -315,21 +343,32 @@ export class DictationController {
     this.stopResultPolling();
   }
 
-  private async reconcileRecordingState(status: StatusPayload, force: boolean): Promise<void> {
+  private async reconcileRecordingState(
+    status: StatusPayload,
+    force: boolean,
+    observation: { epoch: number; sequence: number },
+  ): Promise<boolean> {
     if (status.recording) {
       const observedProfile = asProfile(status.recordingProfile) ?? this.profile;
       if (force || this.state !== "recording" || this.profile !== observedProfile) {
         await this.overlay.showRecording(observedProfile);
       }
+      if (!this.isCurrentStatusObservation(observation)) {
+        return false;
+      }
       this.state = "recording";
       this.profile = observedProfile;
-      return;
+      return true;
     }
     if (force || this.state === "recording") {
+      await this.overlay.hideRecording();
+      if (!this.isCurrentStatusObservation(observation)) {
+        return false;
+      }
       this.state = "idle";
       this.profile = "fast";
-      await this.overlay.hideRecording();
     }
+    return this.isCurrentStatusObservation(observation);
   }
 
   private ensureResultPolling(): void {
@@ -473,6 +512,16 @@ export class DictationController {
     }
     this.lastAppliedStatusSequence = observation.sequence;
     return true;
+  }
+
+  private isCurrentStatusObservation(observation: {
+    epoch: number;
+    sequence: number;
+  }): boolean {
+    return (
+      observation.epoch === this.stateEpoch &&
+      observation.sequence === this.lastAppliedStatusSequence
+    );
   }
 
   private runDetached(label: string, operation: () => Promise<void>): void {

@@ -65,6 +65,22 @@ describe("DictationController", () => {
     expect(harness.recordingProfiles).toEqual(["fast"]);
   });
 
+  it("keeps daemon-authoritative recording state when showing the overlay fails", async () => {
+    const harness = makeHarness([
+      ok({ sessionId: "s1" }),
+      ok({ sessionId: "s1", pendingCount: 1 }),
+    ]);
+    harness.setShowFailure(new Error("overlay renderer crashed"));
+    await harness.controller.startRecording("fast");
+
+    expect(harness.controller.snapshot().state).toBe("recording");
+    expect(harness.alerts.at(-1)).toBe("overlay renderer crashed");
+
+    await harness.controller.stopRecording(false);
+    expect(harness.requests.map(({ command }) => command)).toEqual(["start", "stop"]);
+    expect(harness.controller.snapshot()).toMatchObject({ state: "idle", polling: true });
+  });
+
   it("stops, enqueues the session, and starts a 150 ms poller", async () => {
     const harness = makeHarness([
       ok({ sessionId: "s1" }),
@@ -177,6 +193,51 @@ describe("DictationController", () => {
     expect(requests.map(({ command }) => command)).toEqual(["status", "start"]);
     expect(controller.snapshot().state).toBe("recording");
     expect(alerts.at(-1)).toBe("Recording");
+  });
+
+  it("rechecks the watchdog epoch after awaited overlay rendering", async () => {
+    const requests: ControlRequest[] = [];
+    let releaseRobustOverlay: (() => void) | undefined;
+    let markRobustOverlayStarted: (() => void) | undefined;
+    const robustOverlayStarted = new Promise<void>((resolve) => {
+      markRobustOverlayStarted = resolve;
+    });
+    const robustOverlayRelease = new Promise<void>((resolve) => {
+      releaseRobustOverlay = resolve;
+    });
+    const controller = new DictationController({
+      controlClient: {
+        async send(request) {
+          requests.push(request);
+          if (request.command === "status") {
+            return ok({
+              status: status({ recording: true, recordingProfile: "robust" }),
+            });
+          }
+          return ok({ sessionId: "new-fast-session" });
+        },
+      },
+      alerts: { showAlert: () => undefined },
+      overlay: {
+        showRecording(profile) {
+          if (profile === "robust") {
+            markRobustOverlayStarted?.();
+            return robustOverlayRelease;
+          }
+        },
+        hideRecording: () => undefined,
+      },
+      pasteEngine: new FakePasteEngine(),
+    });
+
+    const watchdog = controller.watchDaemonStatus();
+    await robustOverlayStarted;
+    await controller.startRecording("fast");
+    releaseRobustOverlay?.();
+    await watchdog;
+
+    expect(requests.map(({ command }) => command)).toEqual(["status", "start"]);
+    expect(controller.snapshot()).toMatchObject({ state: "recording", profile: "fast" });
   });
 
   it("surfaces result errors and logs salvage paths", async () => {
@@ -341,6 +402,7 @@ function makeHarness(responses: Array<ControlResponse | Error>) {
   const logErrors: string[] = [];
   const logInfo: string[] = [];
   let hiddenCount = 0;
+  let showFailure: Error | null = null;
   let hideFailure: Error | null = null;
   let alertFailure: Error | null = null;
   const controlClient: ControlClient = {
@@ -376,6 +438,9 @@ function makeHarness(responses: Array<ControlResponse | Error>) {
     },
     overlay: {
       showRecording: (profile) => {
+        if (showFailure) {
+          throw showFailure;
+        }
         recordingProfiles.push(profile);
       },
       hideRecording: () => {
@@ -403,6 +468,9 @@ function makeHarness(responses: Array<ControlResponse | Error>) {
     },
     setHideFailure(error: Error | null) {
       hideFailure = error;
+    },
+    setShowFailure(error: Error | null) {
+      showFailure = error;
     },
     setAlertFailure(error: Error | null) {
       alertFailure = error;
