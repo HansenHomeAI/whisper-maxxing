@@ -1,0 +1,7 @@
+node_modules/
+dist-electron/
+dist-renderer/
+release/
+test-results/
+playwright-report/
+soak-report.json

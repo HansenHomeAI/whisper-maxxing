@@ -1,0 +1,11 @@
+appId: ai.hansenhome.whisperdictation
+productName: WhisperDictation
+directories:
+  output: release
+files:
+  - dist-electron/**
+  - dist-renderer/**
+mac:
+  target: zip
+win:
+  target: zip
