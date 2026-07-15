@@ -231,6 +231,11 @@ and remains the author's daily driver until sign-off.
   pages, `tsc -p tsconfig.build.json` emits core/main ESM under `dist-electron`, and a
   dedicated Vite library build emits the sandboxed settings preload as CommonJS beside the
   compiled settings controller. Packaging consumes only those production outputs.
+- D18: Black-box protocol and soak runs launch the production Electron main process with a
+  temporary config selected by `WD_CONFIG` and `WD_HEADLESS=1`. Headless mode keeps the
+  real capture renderer, transcription ladder, history, and control socket but omits the
+  tray/hotkey result poller so the harness is the sole `nextResult` consumer. Normal app
+  launches always enable the complete UX shell.
 
 ## Pathfinder findings
 
