@@ -234,7 +234,7 @@ function defaultWhisperPaths(
       server: path.win32.join(root, "build", "bin", "Release", "whisper-server.exe"),
       cli: path.win32.join(root, "build", "bin", "Release", "whisper-cli.exe"),
       model: path.win32.join(root, "models", "ggml-small.en.bin"),
-      robustModel: path.win32.join(root, "models", "ggml-large-v3.bin"),
+      robustModel: null,
       vadModel: null,
     };
   }
@@ -249,7 +249,7 @@ function defaultWhisperPaths(
     server: path.join(supportDirectory, "whisper.cpp", "bin", "whisper-server"),
     cli: path.join(supportDirectory, "whisper.cpp", "bin", "whisper-cli"),
     model: path.join(supportDirectory, "models", "ggml-small.en.bin"),
-    robustModel: path.join(supportDirectory, "models", "ggml-large-v3.bin"),
+    robustModel: null,
     vadModel: null,
   };
 }

@@ -6,8 +6,10 @@ directories:
 files:
   - dist-electron/**
   - dist-renderer/**
-  - bin/wdctl.mjs
   - package.json
+extraResources:
+  - from: bin/wdctl.mjs
+    to: bin/wdctl.mjs
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 mac:
   category: public.app-category.productivity

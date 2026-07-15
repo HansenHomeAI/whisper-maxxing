@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -20,6 +20,7 @@ if (expectedSecondArchive !== null) {
 }
 
 const binary = packagedBinary(releaseRoot);
+await access(path.join(packagedResources(releaseRoot), "bin", "wdctl.mjs"));
 const output = execFileSync(binary, ["--version"], {
   encoding: "utf8",
   stdio: ["ignore", "pipe", "pipe"],
@@ -125,7 +126,7 @@ async function verifyCompiledSetup() {
 
 async function listReleaseEntries(root) {
   const { readdir } = await import("node:fs/promises");
-  return readdir(root, { recursive: true });
+  return readdir(root);
 }
 
 function requireMatchingArtifact(entries, extension) {
@@ -148,6 +149,23 @@ function packagedBinary(root) {
   }
   if (process.platform === "win32") {
     return path.join(root, "win-unpacked", "Whisper Maxxing.exe");
+  }
+  throw new Error(`Unsupported artifact smoke platform: ${process.platform}`);
+}
+
+function packagedResources(root) {
+  if (process.platform === "darwin") {
+    const unpacked = process.arch === "arm64" ? "mac-arm64" : "mac";
+    return path.join(
+      root,
+      unpacked,
+      "Whisper Maxxing.app",
+      "Contents",
+      "Resources",
+    );
+  }
+  if (process.platform === "win32") {
+    return path.join(root, "win-unpacked", "resources");
   }
   throw new Error(`Unsupported artifact smoke platform: ${process.platform}`);
 }
