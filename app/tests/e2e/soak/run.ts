@@ -36,6 +36,7 @@ async function main(): Promise<void> {
     const reports: CycleReport[] = [];
     const ownedSessionIds = new Set<string>();
     let resultsDuplicated = 0;
+    let fakeServerTranscripts = 0;
 
     try {
       await waitForEngineReady(target);
@@ -67,6 +68,31 @@ async function main(): Promise<void> {
       if (result.metrics.audioDurationMilliseconds <= 0) {
         throw new Error(`Cycle ${index + 1} produced empty audio metrics`);
       }
+      if (managedElectron !== null) {
+        if (result.errorMessage) {
+          throw new Error(
+            `Cycle ${index + 1} returned an error result: ${result.errorMessage}`,
+          );
+        }
+        if (result.metrics.transcriptionMode === "server") {
+          const expected = new RegExp(
+            `^electron-${managedElectron.transcriptNonce}-\\d+$`,
+          );
+          if (!expected.test(result.text)) {
+            throw new Error(
+              `Cycle ${index + 1} did not return the runtime-nonce transcript`,
+            );
+          }
+          fakeServerTranscripts += 1;
+        } else if (
+          result.metrics.transcriptionMode !== "silent-capture" ||
+          result.text !== ""
+        ) {
+          throw new Error(
+            `Cycle ${index + 1} bypassed the managed fake server with mode ${String(result.metrics.transcriptionMode)}`,
+          );
+        }
+      }
 
       await waitForPendingCount(target, 0);
       const cycleDuplicates = await countLateDuplicates(target, sessionId);
@@ -90,6 +116,9 @@ async function main(): Promise<void> {
       process.stdout.write(
         `cycle ${index + 1}/${cycles} ${sessionId} ${outcome} ${latencyMilliseconds.toFixed(1)}ms\n`,
       );
+    }
+    if (managedElectron !== null && fakeServerTranscripts === 0) {
+      throw new Error("Soak never exercised the managed fake whisper server");
     }
     } finally {
       await drainOwnedSessions(target, ownedSessionIds);

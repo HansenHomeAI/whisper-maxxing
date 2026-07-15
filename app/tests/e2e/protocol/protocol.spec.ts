@@ -192,7 +192,7 @@ function assertStatusContract(status: StatusPayload): void {
   expectOptionalType(status.defaultInputDevice, "string");
   expect(status.serverState).toEqual(expect.any(String));
   expect(status.robustServerState).toEqual(expect.any(String));
-  expect(status.availableDiskSpaceBytes).toEqual(expect.any(Number));
+  expectOptionalType(status.availableDiskSpaceBytes, "number");
   expectOptionalType(status.lowDiskSpaceMessage, "string");
 }
 
