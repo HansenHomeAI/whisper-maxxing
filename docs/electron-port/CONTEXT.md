@@ -196,6 +196,10 @@ and remains the author's daily driver until sign-off.
   ST-1 merges — new deps only via a core-agent commit at a merge gate.
 - D8: Windows hotkeys use Control instead of Command; all other UX strings/timings identical.
 - D9: `openSettings` is the only new control command in this port.
+- D10: Subsystem Playwright specs stay inside their brief-owned test trees:
+  `tests/capture/e2e`, `tests/ux/e2e`, and `tests/settings/e2e`. The frozen npm E2E commands
+  target those directories explicitly, and Playwright scans only those three patterns. This
+  resolves the original scaffold path mismatch without broadening branch ownership.
 
 ## Pathfinder findings
 

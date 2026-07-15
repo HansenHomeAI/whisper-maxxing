@@ -13,9 +13,9 @@
     "test:ux": "vitest run tests/ux",
     "test:settings": "vitest run tests/settings",
     "e2e": "playwright test",
-    "e2e:capture-smoke": "playwright test tests/e2e/capture-smoke",
-    "e2e:overlay": "playwright test tests/e2e/overlay",
-    "e2e:settings": "playwright test tests/e2e/settings",
+    "e2e:capture-smoke": "playwright test tests/capture/e2e",
+    "e2e:overlay": "playwright test tests/ux/e2e",
+    "e2e:settings": "playwright test tests/settings/e2e",
     "e2e:protocol": "vitest run tests/e2e/protocol",
     "soak": "tsx tests/e2e/soak/run.ts",
     "dist": "electron-builder"
