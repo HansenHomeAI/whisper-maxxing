@@ -13,9 +13,14 @@ import { mono16BitPCMData } from "../../core/wavFileWriter.js";
 import type {
   CapturedAudioFrame,
   CaptureClock,
+  CaptureDateClock,
   CaptureSource,
 } from "./captureSource.js";
-import { systemCaptureClock } from "./captureSource.js";
+import {
+  systemCaptureClock,
+  systemCaptureDateClock,
+} from "./captureSource.js";
+import { restartElectronApplication } from "./electronRestart.js";
 
 const SAMPLE_RATE = 16_000;
 const STARTUP_TIMEOUT_MILLISECONDS = 2_000;
@@ -81,18 +86,31 @@ export interface CaptureEngineOptions {
     | "tempDirectory"
   >;
   clock?: CaptureClock;
+  dateClock?: CaptureDateClock;
   restartProcess?: () => void | Promise<void>;
+  onError?: (error: Error) => void;
+  fileSystem?: CaptureFileSystem;
   delay?: (milliseconds: number) => Promise<void>;
   startupTimeoutMilliseconds?: number;
   restartRetryDelayMilliseconds?: number;
   createSessionId?: () => string;
 }
 
+export interface CaptureFileSystem {
+  makeDirectory(path: string): Promise<void>;
+  write(path: string, data: Uint8Array): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  remove(path: string): Promise<void>;
+}
+
 export class CaptureEngine {
   private readonly source: CaptureSource;
   private readonly config: CaptureEngineOptions["config"];
   private readonly clock: CaptureClock;
+  private readonly dateClock: CaptureDateClock;
   private readonly restartProcess: () => void | Promise<void>;
+  private readonly onError: (error: Error) => void;
+  private readonly fileSystem: CaptureFileSystem;
   private readonly delay: (milliseconds: number) => Promise<void>;
   private readonly startupTimeoutMilliseconds: number;
   private readonly restartRetryDelayMilliseconds: number;
@@ -104,6 +122,8 @@ export class CaptureEngine {
   private startupSignaled = false;
   private lastFrameAtMilliseconds: number | null = null;
   private firstFrameWaiter: (() => void) | null = null;
+  private firstFrameRejecter: ((error: Error) => void) | null = null;
+  private startupError: Error | null = null;
   private recoveryPromise: Promise<void> | null = null;
   private deferredRestartReason: string | null = null;
   private consecutiveRestartFailures = 0;
@@ -117,7 +137,11 @@ export class CaptureEngine {
     this.source = options.source;
     this.config = options.config;
     this.clock = options.clock ?? systemCaptureClock;
-    this.restartProcess = options.restartProcess ?? (() => undefined);
+    this.dateClock = options.dateClock ?? systemCaptureDateClock;
+    this.restartProcess =
+      options.restartProcess ?? restartElectronApplication;
+    this.onError = options.onError ?? (() => undefined);
+    this.fileSystem = options.fileSystem ?? nodeCaptureFileSystem;
     this.delay = options.delay ?? defaultDelay;
     this.startupTimeoutMilliseconds =
       options.startupTimeoutMilliseconds ?? STARTUP_TIMEOUT_MILLISECONDS;
@@ -160,7 +184,7 @@ export class CaptureEngine {
     this.activeSession = {
       sessionId,
       transcriptionProfile: profile,
-      startedAt: new Date(startedAtMilliseconds),
+      startedAt: this.dateClock.nowDate(),
       startedAtMilliseconds,
       prebufferMilliseconds,
       samples: Array.from(prebuffer),
@@ -184,7 +208,7 @@ export class CaptureEngine {
     }
 
     const stoppedAtMilliseconds = this.clock.now();
-    const stoppedAt = new Date(stoppedAtMilliseconds);
+    const stoppedAt = this.dateClock.nowDate();
     const samples = Int16Array.from(session.samples);
     const signalMetrics = analyzeSignal(samples);
     const audioDurationMilliseconds = samples.length / 16;
@@ -201,7 +225,12 @@ export class CaptureEngine {
       0,
     );
     const wavPath = join(this.config.tempDirectory, `${session.sessionId}.wav`);
-    await writeWavAtomically(wavPath, samples);
+    try {
+      await writeWavAtomically(wavPath, samples, this.fileSystem);
+    } catch (error) {
+      this.surfaceError(toError(error));
+      throw error;
+    }
 
     if (signalMetrics.probablySilent) {
       this.scheduleRestart(
@@ -263,13 +292,21 @@ export class CaptureEngine {
     this.disposed = true;
     this.activeSession = null;
     this.deferredRestartReason = null;
-    await this.source.stop();
-    this.markStopped();
+    try {
+      await this.source.stop();
+    } catch (error) {
+      const surfacedError = toError(error);
+      this.surfaceError(surfacedError);
+      throw surfacedError;
+    } finally {
+      this.markStopped();
+    }
   }
 
   private async startSource(): Promise<void> {
     this.startupInProgress = true;
     this.startupSignaled = false;
+    this.startupError = null;
     this.lastFrameAtMilliseconds = null;
     const startedAt = this.clock.now();
 
@@ -279,7 +316,15 @@ export class CaptureEngine {
           preferredInputDevice: this.config.preferredInputDevice,
           enforcePreferredInputDevice: this.config.enforcePreferredInputDevice,
           onFrame: (frame) => this.handleFrame(frame),
-          onError: (error) => this.scheduleRestart(error.message),
+          onError: (error) => {
+            if (this.startupInProgress) {
+              this.startupError = error;
+              this.firstFrameRejecter?.(error);
+              return;
+            }
+            this.surfaceError(error);
+            this.scheduleRestart(error.message);
+          },
         }),
         this.startupTimeoutMilliseconds,
       );
@@ -294,10 +339,19 @@ export class CaptureEngine {
       this.consecutiveRestartFailures = 0;
       this.engineHealthMessage = null;
     } catch (error) {
-      this.engineHealthMessage = errorMessage(error);
+      let surfacedError = toError(error);
       this.markStopped();
-      await this.source.stop().catch(() => undefined);
-      throw error;
+      try {
+        await this.source.stop();
+      } catch (cleanupError) {
+        surfacedError = combineErrors(
+          surfacedError,
+          toError(cleanupError),
+          "Audio capture startup and source cleanup both failed.",
+        );
+      }
+      this.surfaceError(surfacedError);
+      throw surfacedError;
     }
   }
 
@@ -318,14 +372,18 @@ export class CaptureEngine {
   }
 
   private async waitForFirstFrame(timeoutMilliseconds: number): Promise<void> {
+    if (this.startupError !== null) {
+      throw this.startupError;
+    }
     if (this.startupSignaled) {
       return;
     }
     let timeout: ReturnType<typeof setTimeout> | null = null;
     try {
       await Promise.race([
-        new Promise<void>((resolve) => {
+        new Promise<void>((resolve, reject) => {
           this.firstFrameWaiter = resolve;
+          this.firstFrameRejecter = reject;
         }),
         new Promise<never>((_resolve, reject) => {
           timeout = setTimeout(() => {
@@ -343,6 +401,7 @@ export class CaptureEngine {
         clearTimeout(timeout);
       }
       this.firstFrameWaiter = null;
+      this.firstFrameRejecter = null;
     }
   }
 
@@ -359,7 +418,7 @@ export class CaptureEngine {
     }
     this.recoveryPromise = this.recover(reason)
       .catch((error: unknown) => {
-        this.engineHealthMessage = errorMessage(error);
+        this.surfaceError(toError(error));
       })
       .finally(() => {
         this.recoveryPromise = null;
@@ -376,7 +435,9 @@ export class CaptureEngine {
         return;
       } catch (error) {
         this.consecutiveRestartFailures += 1;
-        this.engineHealthMessage = `Audio capture restart failed: ${errorMessage(error)}`;
+        this.surfaceError(
+          new Error(`Audio capture restart failed: ${errorMessage(error)}`),
+        );
         const decision = assessCaptureRestart(
           this.consecutiveRestartFailures,
         );
@@ -404,6 +465,14 @@ export class CaptureEngine {
     this.startupSignaled = false;
     this.lastFrameAtMilliseconds = null;
     this.firstFrameWaiter = null;
+    this.firstFrameRejecter = null;
+    this.startupError = null;
+    this.ringBuffer.clear();
+  }
+
+  private surfaceError(error: Error): void {
+    this.engineHealthMessage = errorMessage(error);
+    this.onError(error);
   }
 }
 
@@ -446,15 +515,27 @@ function formatDecibels(value: number): string {
 async function writeWavAtomically(
   path: string,
   samples: Int16Array,
+  fileSystem: CaptureFileSystem,
 ): Promise<void> {
-  await mkdir(dirname(path), { recursive: true });
+  await fileSystem.makeDirectory(dirname(path));
   const temporaryPath = `${path}.${randomUUID()}.tmp`;
   try {
-    await writeFile(temporaryPath, mono16BitPCMData(samples, SAMPLE_RATE));
-    await rename(temporaryPath, path);
+    await fileSystem.write(
+      temporaryPath,
+      mono16BitPCMData(samples, SAMPLE_RATE),
+    );
+    await fileSystem.rename(temporaryPath, path);
   } catch (error) {
-    await rm(temporaryPath, { force: true }).catch(() => undefined);
-    throw error;
+    try {
+      await fileSystem.remove(temporaryPath);
+    } catch (cleanupError) {
+      throw combineErrors(
+        toError(error),
+        toError(cleanupError),
+        "Writing the capture WAV and cleaning its temporary file both failed.",
+      );
+    }
+    throw toError(error);
   }
 }
 
@@ -463,8 +544,37 @@ function defaultDelay(milliseconds: number): Promise<void> {
 }
 
 function errorMessage(error: unknown): string {
+  if (error instanceof AggregateError) {
+    const details = error.errors.map(errorMessage).join("; ");
+    return details.length > 0 ? `${error.message} ${details}` : error.message;
+  }
   return error instanceof Error ? error.message : String(error);
 }
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+
+function combineErrors(
+  primary: Error,
+  cleanup: Error,
+  message: string,
+): AggregateError {
+  return new AggregateError([primary, cleanup], message);
+}
+
+const nodeCaptureFileSystem: CaptureFileSystem = {
+  makeDirectory: async (path) => {
+    await mkdir(path, { recursive: true });
+  },
+  write: async (path, data) => {
+    await writeFile(path, data);
+  },
+  rename,
+  remove: async (path) => {
+    await rm(path, { force: true });
+  },
+};
 
 async function withTimeout<T>(
   promise: Promise<T>,

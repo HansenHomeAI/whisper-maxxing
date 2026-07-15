@@ -1,6 +1,4 @@
 import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
-
 import {
   BrowserWindow,
   MessageChannelMain,
@@ -13,6 +11,7 @@ import type {
   CaptureSourceInfo,
   CaptureSourceStartOptions,
 } from "./captureSource.js";
+import { captureRendererPagePath } from "./captureRendererAssets.js";
 
 interface RendererCaptureSourceOptions {
   capturePagePath?: string;
@@ -21,7 +20,13 @@ interface RendererCaptureSourceOptions {
 type RendererMessage =
   | { type: "connected" }
   | { type: "ready"; defaultInputDeviceName: string | null }
-  | { type: "frame"; samples: Int16Array; timestampMilliseconds: number }
+  | {
+      type: "frame";
+      samples: Int16Array | ArrayBuffer;
+      timestampMilliseconds: number;
+    }
+  | { type: "transferStatus"; detached: boolean }
+  | { type: "stopped" }
   | { type: "error"; message: string };
 
 export class RendererCaptureSource implements CaptureSource {
@@ -29,13 +34,16 @@ export class RendererCaptureSource implements CaptureSource {
   private window: BrowserWindow | null = null;
   private port: MessagePortMain | null = null;
   private stopping = false;
+  private stopWaiter: {
+    resolve: () => void;
+    reject: (error: Error) => void;
+  } | null = null;
+  lastFrameTransferDetached: boolean | null = null;
 
   constructor(options: RendererCaptureSourceOptions = {}) {
     this.capturePagePath =
       options.capturePagePath ??
-      fileURLToPath(
-        new URL("../../renderer/capture/capture.html", import.meta.url),
-      );
+      captureRendererPagePath();
   }
 
   async start(
@@ -43,6 +51,7 @@ export class RendererCaptureSource implements CaptureSource {
   ): Promise<CaptureSourceInfo> {
     await this.stop();
     this.stopping = false;
+    this.lastFrameTransferDetached = null;
 
     const captureWindow = new BrowserWindow({
       show: false,
@@ -72,6 +81,9 @@ export class RendererCaptureSource implements CaptureSource {
         this.window = null;
         this.port?.close();
         this.port = null;
+        this.rejectStopWaiter(
+          new Error("Audio capture window closed during cleanup."),
+        );
         if (!this.stopping) {
           fail(new Error("Audio capture window closed unexpectedly."));
         }
@@ -118,7 +130,21 @@ export class RendererCaptureSource implements CaptureSource {
             return;
           }
           if (message.type === "error") {
-            fail(new Error(message.message));
+            const error = new Error(message.message);
+            if (this.stopWaiter !== null) {
+              this.rejectStopWaiter(error);
+            } else {
+              fail(error);
+            }
+            return;
+          }
+          if (message.type === "stopped") {
+            this.stopWaiter?.resolve();
+            this.stopWaiter = null;
+            return;
+          }
+          if (message.type === "transferStatus") {
+            this.lastFrameTransferDetached = message.detached;
             return;
           }
           const samples =
@@ -145,13 +171,59 @@ export class RendererCaptureSource implements CaptureSource {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    this.port?.postMessage({ type: "stop" });
-    this.port?.close();
+    const errors: Error[] = [];
+    const port = this.port;
+    if (port !== null) {
+      try {
+        await this.requestRendererStop(port);
+      } catch (error) {
+        errors.push(toError(error));
+      }
+    }
+    try {
+      this.port?.close();
+    } catch (error) {
+      errors.push(toError(error));
+    }
     this.port = null;
     if (this.window !== null && !this.window.isDestroyed()) {
-      this.window.destroy();
+      try {
+        this.window.destroy();
+      } catch (error) {
+        errors.push(toError(error));
+      }
     }
     this.window = null;
+    if (errors.length > 0) {
+      throw new AggregateError(errors, "Audio capture source cleanup failed.");
+    }
+  }
+
+  private async requestRendererStop(port: MessagePortMain): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | null = null;
+    try {
+      await Promise.race([
+        new Promise<void>((resolve, reject) => {
+          this.stopWaiter = { resolve, reject };
+          port.postMessage({ type: "stop" });
+        }),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => {
+            reject(new Error("Audio capture renderer cleanup timed out."));
+          }, 1_000);
+        }),
+      ]);
+    } finally {
+      if (timeout !== null) {
+        clearTimeout(timeout);
+      }
+      this.stopWaiter = null;
+    }
+  }
+
+  private rejectStopWaiter(error: Error): void {
+    this.stopWaiter?.reject(error);
+    this.stopWaiter = null;
   }
 }
 
@@ -170,4 +242,8 @@ function capturedSamples(value: unknown): Int16Array | null {
     return new Int16Array(value);
   }
   return null;
+}
+
+function toError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }

@@ -8,7 +8,10 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   CaptureEngine,
   CaptureEngineError,
+  type CaptureEngineOptions,
+  type CaptureFileSystem,
 } from "../../src/main/capture/captureEngine.js";
+import { restartElectronApplication } from "../../src/main/capture/electronRestart.js";
 import {
   FakeCaptureClock,
   FakeCaptureSource,
@@ -76,6 +79,8 @@ describe("CaptureEngine", () => {
       activeAudioMilliseconds: 500,
       droppedMilliseconds: 0,
     });
+    expect(capture!.startedAt.getUTCFullYear()).toBe(2026);
+    expect(capture!.stoppedAt.getUTCFullYear()).toBe(2026);
     expect(capture!.signalMetrics.probablySilent).toBe(false);
   });
 
@@ -136,6 +141,119 @@ describe("CaptureEngine", () => {
     expect(engine.readinessAssessment().ready).toBe(false);
   });
 
+  it("uses the Electron relaunch and temporary-failure exit by default", async () => {
+    const actions: string[] = [];
+    await restartElectronApplication({
+      relaunch: () => actions.push("relaunch"),
+      exit: (code) => actions.push(`exit:${code}`),
+    });
+    expect(actions).toEqual(["relaunch", "exit:75"]);
+  });
+
+  it("clears prebuffer samples when disposed and restarted", async () => {
+    await startEngineAndFeedFrames(engine, source, clock, 5);
+    expect(engine.prebufferAvailableMilliseconds()).toBe(500);
+    await engine.dispose();
+    expect(engine.prebufferAvailableMilliseconds()).toBe(0);
+
+    source.rewind();
+    await startEngineAndFeedFrames(engine, source, clock, 1);
+    expect(engine.prebufferAvailableMilliseconds()).toBe(100);
+  });
+
+  it("preserves and reports startup plus cleanup failures", async () => {
+    const startFailure = new Error("source start failed");
+    const cleanupFailure = new Error("source cleanup failed");
+    const reported: Error[] = [];
+    source.queueStartFailures(startFailure);
+    source.queueStopFailures(cleanupFailure);
+    engine = createEngine(source, clock, directory, undefined, {
+      onError: (error) => reported.push(error),
+    });
+
+    let thrown: unknown;
+    try {
+      await engine.startAsync();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([
+      startFailure,
+      cleanupFailure,
+    ]);
+    expect(reported.at(-1)).toBe(thrown);
+    expect(engine.engineHealthMessage).toContain("source start failed");
+    expect(engine.engineHealthMessage).toContain("source cleanup failed");
+  });
+
+  it("rejects a source error that arrives while awaiting the first frame", async () => {
+    const streamFailure = new Error("microphone stream failed before first frame");
+    const reported: Error[] = [];
+    engine = createEngine(source, clock, directory, undefined, {
+      onError: (error) => reported.push(error),
+    });
+
+    const startup = engine.startAsync();
+    source.failStream(streamFailure.message);
+
+    await expect(startup).rejects.toThrow(streamFailure.message);
+    expect(reported).toHaveLength(1);
+    expect(reported[0]?.message).toBe(streamFailure.message);
+    expect(engine.readinessAssessment().reason).toBe("capture-engine-stopped");
+  });
+
+  it("preserves and reports WAV failure plus temp cleanup failure", async () => {
+    const renameFailure = new Error("WAV rename failed");
+    const cleanupFailure = new Error("temp removal failed");
+    const reported: Error[] = [];
+    const fileSystem: CaptureFileSystem = {
+      makeDirectory: async () => undefined,
+      write: async () => undefined,
+      rename: async () => {
+        throw renameFailure;
+      },
+      remove: async () => {
+        throw cleanupFailure;
+      },
+    };
+    engine = createEngine(source, clock, directory, undefined, {
+      fileSystem,
+      onError: (error) => reported.push(error),
+    });
+    await startEngineAndFeedFrames(engine, source, clock, 1);
+    engine.startSession("fast");
+    feedFrames(source, clock, 1);
+
+    let thrown: unknown;
+    try {
+      await engine.stopSession(false);
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(AggregateError);
+    expect((thrown as AggregateError).errors).toEqual([
+      renameFailure,
+      cleanupFailure,
+    ]);
+    expect(reported.at(-1)).toBe(thrown);
+  });
+
+  it("clears state and reports a dispose cleanup failure", async () => {
+    const cleanupFailure = new Error("capture stop failed");
+    const reported: Error[] = [];
+    engine = createEngine(source, clock, directory, undefined, {
+      onError: (error) => reported.push(error),
+    });
+    await startEngineAndFeedFrames(engine, source, clock, 2);
+    source.queueStopFailures(cleanupFailure);
+
+    await expect(engine.dispose()).rejects.toBe(cleanupFailure);
+    expect(engine.prebufferAvailableMilliseconds()).toBe(0);
+    expect(engine.readinessAssessment().reason).toBe("capture-engine-stopped");
+    expect(reported).toContain(cleanupFailure);
+  });
+
   it("surfaces enforced preferred-device failures as not ready", async () => {
     engine = new CaptureEngine({
       source,
@@ -178,7 +296,8 @@ function createEngine(
   source: FakeCaptureSource,
   clock: FakeCaptureClock,
   directory: string,
-  restartProcess: () => void = () => undefined,
+  restartProcess: (() => void) | undefined = () => undefined,
+  overrides: Partial<CaptureEngineOptions> = {},
 ): CaptureEngine {
   return new CaptureEngine({
     source,
@@ -189,11 +308,13 @@ function createEngine(
       tempDirectory: directory,
     },
     clock,
-    restartProcess,
+    dateClock: clock,
+    ...(restartProcess === undefined ? {} : { restartProcess }),
     delay: async () => undefined,
     startupTimeoutMilliseconds: 100,
     restartRetryDelayMilliseconds: 0,
     createSessionId: () => "00000000-0000-0000-0000-000000000001",
+    ...overrides,
   });
 }
 

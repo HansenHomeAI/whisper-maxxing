@@ -2,16 +2,24 @@ import { readFileSync } from "node:fs";
 
 import type {
   CaptureClock,
+  CaptureDateClock,
   CaptureSource,
   CaptureSourceInfo,
   CaptureSourceStartOptions,
 } from "../../src/main/capture/captureSource.js";
 
-export class FakeCaptureClock implements CaptureClock {
-  constructor(private currentMilliseconds = 0) {}
+export class FakeCaptureClock implements CaptureClock, CaptureDateClock {
+  constructor(
+    private currentMilliseconds = 0,
+    private readonly epochMilliseconds = Date.UTC(2026, 0, 1),
+  ) {}
 
   now(): number {
     return this.currentMilliseconds;
+  }
+
+  nowDate(): Date {
+    return new Date(this.epochMilliseconds + this.currentMilliseconds);
   }
 
   advance(milliseconds: number): void {
@@ -37,6 +45,7 @@ export class FakeCaptureSource implements CaptureSource {
   private readonly availableInputDevices: string[];
   private readonly configuredDefaultInputDeviceName: string;
   private startFailures: Error[] = [];
+  private stopFailures: Error[] = [];
   private startOptions: CaptureSourceStartOptions | null = null;
   private sampleOffset = 0;
 
@@ -79,10 +88,18 @@ export class FakeCaptureSource implements CaptureSource {
   async stop(): Promise<void> {
     this.stopCallCount += 1;
     this.startOptions = null;
+    const failure = this.stopFailures.shift();
+    if (failure !== undefined) {
+      throw failure;
+    }
   }
 
   queueStartFailures(...failures: Error[]): void {
     this.startFailures.push(...failures);
+  }
+
+  queueStopFailures(...failures: Error[]): void {
+    this.stopFailures.push(...failures);
   }
 
   emitNextFrame(): Int16Array {

@@ -5,6 +5,7 @@ let context = null;
 let sourceNode = null;
 let workletNode = null;
 let mainPort = null;
+let transferStatusReported = false;
 
 ipcRenderer.on("capture:connect", (event) => {
   const [port] = event.ports;
@@ -17,7 +18,11 @@ ipcRenderer.on("capture:connect", (event) => {
     if (message?.type === "start") {
       void startCapture(message);
     } else if (message?.type === "stop") {
-      void stopCapture();
+      void stopCapture()
+        .then(() => mainPort?.postMessage({ type: "stopped" }))
+        .catch((error) => {
+          postError(error);
+        });
     }
   };
   mainPort.start();
@@ -26,6 +31,7 @@ ipcRenderer.on("capture:connect", (event) => {
 
 async function startCapture(options) {
   try {
+    transferStatusReported = false;
     await stopCapture();
     let selectedStream = await navigator.mediaDevices.getUserMedia({
       audio: rawAudioConstraints(),
@@ -69,9 +75,31 @@ async function startCapture(options) {
     );
     sourceNode = context.createMediaStreamSource(stream);
     workletNode = new AudioWorkletNode(context, "whisper-capture");
+    workletNode.onprocessorerror = () => {
+      postError(new Error("Audio capture worklet processor failed."));
+    };
     workletNode.port.onmessage = (workletEvent) => {
-      const frame = workletEvent.data;
-      mainPort?.postMessage(frame);
+      try {
+        const frame = workletEvent.data;
+        const samples =
+          frame.samples instanceof Int16Array
+            ? frame.samples
+            : new Int16Array(frame.samples);
+        const senderBuffer = samples.buffer;
+        const transferredBuffer = structuredClone(senderBuffer, {
+          transfer: [senderBuffer],
+        });
+        mainPort?.postMessage({ ...frame, samples: transferredBuffer });
+        if (!transferStatusReported) {
+          transferStatusReported = true;
+          mainPort?.postMessage({
+            type: "transferStatus",
+            detached: senderBuffer.byteLength === 0,
+          });
+        }
+      } catch (error) {
+        postError(error);
+      }
     };
     sourceNode.connect(workletNode);
     workletNode.connect(context.destination);
@@ -81,24 +109,51 @@ async function startCapture(options) {
       defaultInputDeviceName: track.label || null,
     });
   } catch (error) {
-    await stopCapture();
-    mainPort?.postMessage({
-      type: "error",
-      message: error instanceof Error ? error.message : String(error),
-    });
+    let surfacedError = error;
+    try {
+      await stopCapture();
+    } catch (cleanupError) {
+      surfacedError = new AggregateError(
+        [toError(error), toError(cleanupError)],
+        "Audio capture startup and renderer cleanup both failed.",
+      );
+    }
+    postError(surfacedError);
   }
 }
 
 async function stopCapture() {
-  workletNode?.disconnect();
-  sourceNode?.disconnect();
+  const errors = [];
+  try {
+    workletNode?.disconnect();
+  } catch (error) {
+    errors.push(toError(error));
+  }
+  try {
+    sourceNode?.disconnect();
+  } catch (error) {
+    errors.push(toError(error));
+  }
   workletNode = null;
   sourceNode = null;
-  stream?.getTracks().forEach((track) => track.stop());
+  for (const track of stream?.getTracks() ?? []) {
+    try {
+      track.stop();
+    } catch (error) {
+      errors.push(toError(error));
+    }
+  }
   stream = null;
   if (context) {
-    await context.close();
+    try {
+      await context.close();
+    } catch (error) {
+      errors.push(toError(error));
+    }
     context = null;
+  }
+  if (errors.length > 0) {
+    throw new AggregateError(errors, "Audio capture renderer cleanup failed.");
   }
 }
 
@@ -109,4 +164,22 @@ function rawAudioConstraints() {
     noiseSuppression: false,
     autoGainControl: false,
   };
+}
+
+function postError(error) {
+  mainPort?.postMessage({
+    type: "error",
+    message: errorMessage(error),
+  });
+}
+
+function errorMessage(error) {
+  if (error instanceof AggregateError) {
+    return `${error.message} ${error.errors.map(errorMessage).join("; ")}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function toError(error) {
+  return error instanceof Error ? error : new Error(String(error));
 }

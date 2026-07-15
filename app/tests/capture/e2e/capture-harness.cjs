@@ -11,8 +11,19 @@ const capturePagePath = requireEnvironment("CAPTURE_SMOKE_PAGE");
 app.setPath("userData", `${tempDirectory}/user-data`);
 
 let engine = null;
-app.once("before-quit", () => {
-  void engine?.dispose();
+let shutdownStarted = false;
+app.on("before-quit", (event) => {
+  if (shutdownStarted) {
+    return;
+  }
+  event.preventDefault();
+  shutdownStarted = true;
+  void Promise.race([
+    engine?.dispose(),
+    new Promise((resolve) => setTimeout(resolve, 1_500)),
+  ])
+    .catch(() => undefined)
+    .finally(() => app.exit(0));
 });
 
 void app.whenReady().then(async () => {
@@ -21,8 +32,9 @@ void app.whenReady().then(async () => {
       importModule(`${moduleRoot}/src/main/capture/captureEngine.js`),
       importModule(`${moduleRoot}/src/main/capture/rendererCaptureSource.js`),
     ]);
+    const captureSource = new RendererCaptureSource({ capturePagePath });
     engine = new CaptureEngine({
-      source: new RendererCaptureSource({ capturePagePath }),
+      source: captureSource,
       config: {
         prebufferMilliseconds: 1_000,
         preferredInputDevice: null,
@@ -41,6 +53,7 @@ void app.whenReady().then(async () => {
         wavPath: capture?.wavPath,
         sampleCount: capture?.sampleCount,
         defaultInputDeviceName: engine.defaultInputDeviceName,
+        transferDetached: captureSource.lastFrameTransferDetached,
       }),
     );
   } catch (error) {

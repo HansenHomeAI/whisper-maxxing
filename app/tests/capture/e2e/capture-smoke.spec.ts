@@ -75,6 +75,7 @@ test("hidden renderer records non-silent fake microphone audio", async () => {
     expect(result.ok, result.error).toBe(true);
     expect(result.wavPath).toBeTruthy();
     expect(result.sampleCount).toBeGreaterThan(10_000);
+    expect(result.transferDetached).toBe(true);
     expect(
       await electronApplication.evaluate(({ BrowserWindow }) =>
         BrowserWindow.getAllWindows().every((window) => !window.isVisible()),
@@ -96,6 +97,7 @@ interface SmokeResult {
   error?: string;
   wavPath?: string;
   sampleCount?: number;
+  transferDetached?: boolean;
 }
 
 function rootMeanSquare(samples: Int16Array): number {

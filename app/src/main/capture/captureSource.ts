@@ -23,6 +23,14 @@ export interface CaptureClock {
   now(): number;
 }
 
+export interface CaptureDateClock {
+  nowDate(): Date;
+}
+
 export const systemCaptureClock: CaptureClock = {
   now: () => performance.now(),
+};
+
+export const systemCaptureDateClock: CaptureDateClock = {
+  nowDate: () => new Date(),
 };
