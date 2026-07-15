@@ -16,7 +16,7 @@
     "e2e:capture-smoke": "playwright test tests/capture/e2e",
     "e2e:overlay": "playwright test tests/ux/e2e",
     "e2e:settings": "playwright test tests/settings/e2e",
-    "e2e:protocol": "vitest run tests/e2e/protocol",
+    "e2e:protocol": "vitest run --config vitest.protocol.config.ts",
     "soak": "tsx tests/e2e/soak/run.ts",
     "dist": "electron-builder"
   },
