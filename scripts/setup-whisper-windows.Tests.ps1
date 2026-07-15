@@ -105,6 +105,21 @@ Describe 'setup-whisper-windows orchestration' {
         $result.robustModelPath | Should -BeNullOrEmpty
     }
 
+    It 'keeps noisy orchestration output out of the JSON result' {
+        Mock Sync-WhisperSource { 'git output' }
+        Mock Invoke-WhisperBuild { 'cmake output' }
+        Mock Install-WhisperModel { 'download output' }
+
+        $output = @(Invoke-WhisperWindowsSetup -RequestedRoot $script:Root)
+        $json = $output | ConvertTo-Json -Compress
+        $parsed = $json | ConvertFrom-Json
+
+        $output.Count | Should -Be 1
+        $json | Should -Match '^\{'
+        $parsed.whisperCppRoot | Should -Be ([System.IO.Path]::GetFullPath($script:Root))
+        $parsed.serverPath | Should -Match 'whisper-server\.exe$'
+    }
+
     It 'downloads and selects large-v3 when requested by the environment' {
         $env:WHISPER_MODEL = 'large-v3'
         Set-Content -LiteralPath (Join-Path $script:Models 'ggml-large-v3.bin') -Value 'large model'

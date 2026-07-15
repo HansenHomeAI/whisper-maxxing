@@ -116,7 +116,7 @@ function Sync-WhisperSource {
 
     if (Test-Path -LiteralPath (Join-Path $Root '.git') -PathType Container) {
         Write-Host "Updating whisper.cpp at $Root"
-        & git -C $Root pull --ff-only
+        & git -C $Root pull --ff-only | Out-Host
         if ($LASTEXITCODE -ne 0) {
             throw "git pull failed with exit code $LASTEXITCODE."
         }
@@ -135,7 +135,7 @@ function Sync-WhisperSource {
     }
 
     Write-Host "Cloning whisper.cpp into $Root"
-    & git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git $Root
+    & git clone --depth 1 https://github.com/ggml-org/whisper.cpp.git $Root | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "git clone failed with exit code $LASTEXITCODE."
     }
@@ -149,13 +149,13 @@ function Invoke-WhisperBuild {
 
     $buildDirectory = Join-Path $Root 'build'
     Write-Host 'Configuring whisper.cpp Release build'
-    & cmake -S $Root -B $buildDirectory -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+    & cmake -S $Root -B $buildDirectory -DCMAKE_BUILD_TYPE=Release -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "CMake configure failed with exit code $LASTEXITCODE."
     }
 
     Write-Host 'Building whisper-server.exe and whisper-cli.exe'
-    & cmake --build $buildDirectory --config Release --target whisper-server whisper-cli
+    & cmake --build $buildDirectory --config Release --target whisper-server whisper-cli | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "CMake build failed with exit code $LASTEXITCODE."
     }
@@ -182,7 +182,7 @@ function Install-WhisperModel {
     }
 
     Write-Host "Downloading $Name model"
-    & $downloadScript $Name
+    & $downloadScript $Name | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "Model download for '$Name' failed with exit code $LASTEXITCODE."
     }
@@ -208,11 +208,11 @@ function Invoke-WhisperWindowsSetup {
         }
     }
     else {
-        Sync-WhisperSource $root
-        Invoke-WhisperBuild $root
-        Install-WhisperModel -Root $root -Name 'small.en'
+        Sync-WhisperSource $root | Out-Host
+        Invoke-WhisperBuild $root | Out-Host
+        Install-WhisperModel -Root $root -Name 'small.en' | Out-Host
         if ($IncludeLargeV3 -or $modelName -eq 'large-v3') {
-            Install-WhisperModel -Root $root -Name 'large-v3'
+            Install-WhisperModel -Root $root -Name 'large-v3' | Out-Host
         }
     }
 
