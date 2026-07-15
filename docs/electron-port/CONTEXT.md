@@ -213,6 +213,10 @@ and remains the author's daily driver until sign-off.
   loadable from its packaged `file://` location, including nested settings and capture
   pages. Browser E2E tests must consume the production Vite output rather than replacing
   this setting in a test-only build.
+- D14: Protocol E2E uses a dedicated Vitest config that includes only
+  `tests/e2e/protocol/**/*.spec.ts`. The default Vitest config continues excluding every
+  `e2e` tree so Playwright specs are never collected as unit tests, while the immutable
+  `e2e:protocol` command cannot silently report an empty suite.
 
 ## Pathfinder findings
 
