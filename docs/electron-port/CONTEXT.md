@@ -196,3 +196,17 @@ and remains the author's daily driver until sign-off.
   ST-1 merges — new deps only via a core-agent commit at a merge gate.
 - D8: Windows hotkeys use Control instead of Command; all other UX strings/timings identical.
 - D9: `openSettings` is the only new control command in this port.
+
+## Pathfinder findings
+
+- GitHub `macos-14` must select `/Applications/Xcode_16.2.app/Contents/Developer` before
+  running the Swift reference checks; the runner default does not reliably provide the Swift
+  6 toolchain required by this package.
+- The scaffold pins Node-facing dependencies exactly and keeps every future suite command
+  explicit. A suite whose directory has not landed fails instead of reporting an empty pass.
+- The Node control server must track accepted sockets and destroy them during shutdown.
+  Closing only the listening server can wait forever on an idle client or stalled handler.
+  Asynchronous transport failures are routed through an observable error reporter.
+- Swift transcript character semantics require two Unicode predicates: Foundation
+  `whitespacesAndNewlines` edge trimming includes U+200B, while internal
+  `Character.isWhitespace` filtering does not.
