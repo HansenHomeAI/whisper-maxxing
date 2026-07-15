@@ -8,7 +8,7 @@ import {
   waitForEngineReady,
   waitForPendingCount,
   waitForResult,
-} from "../protocol/controlClient";
+} from "../protocol/controlClient.js";
 
 interface CycleReport {
   cycle: number;

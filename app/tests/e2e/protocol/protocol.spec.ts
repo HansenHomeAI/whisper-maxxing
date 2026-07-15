@@ -10,7 +10,7 @@ import {
   waitForEngineReady,
   waitForPendingCount,
   waitForResult,
-} from "./controlClient";
+} from "./controlClient.js";
 
 const target = targetFromEnvironment();
 const ownedSessionIds = new Set<string>();
