@@ -74,7 +74,10 @@ async function main(): Promise<void> {
             `Cycle ${index + 1} returned an error result: ${result.errorMessage}`,
           );
         }
-        if (result.metrics.transcriptionMode === "server") {
+        if (
+          result.metrics.transcriptionMode === "server" ||
+          result.metrics.transcriptionMode === "robust-server"
+        ) {
           const expected = new RegExp(
             `^electron-${managedElectron.transcriptNonce}-\\d+$`,
           );

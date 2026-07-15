@@ -213,7 +213,7 @@ describe("TranscriptionManager reliability ladder", () => {
     );
     const harness = await createHarness(
       server,
-      { cliTimeoutSeconds: 0.05 },
+      { cliTimeoutSeconds: 0.5 },
       [{ kind: "hang" }],
     );
 

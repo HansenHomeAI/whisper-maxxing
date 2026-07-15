@@ -252,6 +252,9 @@ and remains the author's daily driver until sign-off.
   system's login-item registration. The managed protocol config also sets
   `launchAtLogin:false` defensively; normal application launches still apply the user's
   configured launch-at-login preference.
+- D23: Fake CLI timeout coverage allows 500 ms for Node process startup on Windows while
+  remaining strictly bounded, and nonce-backed protocol assertions recognize both fast
+  `server` and explicit `robust-server` modes as real resident-server inference.
 
 ## Pathfinder findings
 

@@ -214,7 +214,10 @@ function assertResultContract(result: SessionResult, sessionId: string): void {
   expect(result.metrics.completedAtISO8601).toEqual(expect.any(String));
   if (managedElectron !== null) {
     expect(result.errorMessage ?? undefined).toBeUndefined();
-    if (result.metrics.transcriptionMode === "server") {
+    if (
+      result.metrics.transcriptionMode === "server" ||
+      result.metrics.transcriptionMode === "robust-server"
+    ) {
       expect(result.text).toMatch(
         new RegExp(`^electron-${managedElectron.transcriptNonce}-\\d+$`),
       );
