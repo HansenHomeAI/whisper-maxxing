@@ -5,6 +5,7 @@ export const HOTKEY_ACCELERATORS = {
   toggleDictation: electronAccelerator(UX_CONTRACT.hotkeys.toggleDictation),
   retryRobust: electronAccelerator(UX_CONTRACT.hotkeys.retryRobust),
   cancelRecording: electronAccelerator(UX_CONTRACT.hotkeys.cancelRecording),
+  openHistory: historyHotkeyAccelerator(process.platform),
 } as const;
 
 export interface HotkeyRegistrar {
@@ -15,12 +16,14 @@ export interface HotkeyRegistrar {
 export function registerUxHotkeys(
   controller: DictationController,
   registrar: HotkeyRegistrar,
+  openHistory: () => Promise<void>,
   onError: (error: Error) => void = (error) => console.error("hotkey error", error),
 ): () => void {
   const registrations = [
     [HOTKEY_ACCELERATORS.toggleDictation, () => controller.toggleDictation()],
     [HOTKEY_ACCELERATORS.retryRobust, () => controller.retryRobustTranscription()],
     [HOTKEY_ACCELERATORS.cancelRecording, () => controller.cancelRecording()],
+    [HOTKEY_ACCELERATORS.openHistory, openHistory],
   ] as const;
   const registered: string[] = [];
 
@@ -56,10 +59,15 @@ export function registerUxHotkeys(
 
 export async function registerSystemUxHotkeys(
   controller: DictationController,
+  openHistory: () => Promise<void>,
   onError?: (error: Error) => void,
 ): Promise<() => void> {
   const { globalShortcut } = await import("electron");
-  return registerUxHotkeys(controller, globalShortcut, onError);
+  return registerUxHotkeys(controller, globalShortcut, openHistory, onError);
+}
+
+export function historyHotkeyAccelerator(platform: NodeJS.Platform): string {
+  return platform === "darwin" ? "Command+Control+H" : "CommandOrControl+Shift+H";
 }
 
 function electronAccelerator(contractHotkey: string): string {

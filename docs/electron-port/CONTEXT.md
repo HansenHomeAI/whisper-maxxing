@@ -93,7 +93,8 @@ and remains the author's daily driver until sign-off.
   Windows), spawned and health-checked by the app exactly like `TranscriptionManager` does.
   Windows builds of whisper.cpp are produced by `scripts/setup-whisper-windows.ps1` (ST-6a).
 - **Hotkeys**: Electron `globalShortcut`. macOS: `Command+.`, `Command+;`, `Command+,`
-  (identical to today). Windows: `Control+.`, `Control+;`, `Control+,`.
+  (identical to today), plus `Command+Control+H` to open history/settings. Windows:
+  `Control+.`, `Control+;`, `Control+,`, plus `Control+Shift+H` for history/settings.
 - **Overlay & alerts**: one transparent, frameless, always-on-top, click-through,
   non-focusable BrowserWindow rendering the recording pill (bottom-center, red dot + label)
   and alert toasts. Exact strings, sizes, and timings are in
@@ -258,6 +259,9 @@ and remains the author's daily driver until sign-off.
 - D24: Nested acceptance builds invoke npm's resolved CLI JavaScript with npm's Node binary
   when available. This avoids Windows `.cmd` spawn semantics while preserving the exact
   production build command; direct `npm`/`npm.cmd` remains a non-npm fallback.
+- D25: History/settings uses `Command+Control+H` on macOS and `Control+Shift+H` on Windows.
+  Plain `Command+H` remains the macOS Hide command; the history binding is deliberately
+  outside the parity fixture because it is an additive post-port shortcut.
 
 ## Pathfinder findings
 

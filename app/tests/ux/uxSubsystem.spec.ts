@@ -29,6 +29,7 @@ describe("UX subsystem detached operations", () => {
         },
       },
       hotkeys: { register: () => true, unregister: () => undefined },
+      openHistory: async () => undefined,
       setTimeout(callback) {
         timeoutCallbacks.push(callback);
         return callback;

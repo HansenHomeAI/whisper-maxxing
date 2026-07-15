@@ -120,6 +120,7 @@ async function startApplication(): Promise<void> {
     controller,
     alerts: overlay,
     hotkeys: globalShortcut,
+    openHistory: () => history.settingsWindow.open(),
     logger: console,
   });
   await ux.start();
