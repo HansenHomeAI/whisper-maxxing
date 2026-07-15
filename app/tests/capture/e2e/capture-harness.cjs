@@ -1,3 +1,4 @@
+const { writeFileSync } = require("node:fs");
 const { writeFile } = require("node:fs/promises");
 const { pathToFileURL } = require("node:url");
 
@@ -13,16 +14,30 @@ app.setPath("userData", `${tempDirectory}/user-data`);
 let engine = null;
 let lifecycleWindow = null;
 let shutdownStarted = false;
+let artifactFailuresRemaining = Number(
+  process.env.CAPTURE_SMOKE_ARTIFACT_FAILURES ?? 0,
+);
 app.on("before-quit", (event) => {
   if (shutdownStarted) {
     return;
   }
   event.preventDefault();
   shutdownStarted = true;
-  void shutdownAndExit();
+  void Promise.resolve()
+    .then(() => shutdownAndExit())
+    .catch((error) => {
+      reportDetachedFailureAndExit("Capture shutdown chain failed", error);
+    });
 });
 
-void app.whenReady().then(async () => {
+void Promise.resolve()
+  .then(() => app.whenReady())
+  .then(() => runCaptureScenario())
+  .catch((error) => {
+    reportDetachedFailureAndExit("Capture readiness chain failed", error);
+  });
+
+async function runCaptureScenario() {
   try {
     lifecycleWindow = new BrowserWindow({
       show: false,
@@ -63,23 +78,23 @@ void app.whenReady().then(async () => {
     );
     await engine.dispose();
     engine = null;
-    await writeFile(
-      outputPath,
-      JSON.stringify({
-        ok: true,
-        wavPath: capture?.wavPath,
-        sampleCount: capture?.sampleCount,
-        defaultInputDeviceName,
-        transferDetached: captureSource.lastFrameTransferDetached,
-        allWindowsHidden,
-      }),
-    );
+    await writeArtifact({
+      ok: true,
+      wavPath: capture?.wavPath,
+      sampleCount: capture?.sampleCount,
+      defaultInputDeviceName,
+      transferDetached: captureSource.lastFrameTransferDetached,
+      allWindowsHidden,
+    });
   } catch (error) {
     await writeFailure(error);
   }
-});
+}
 
 async function shutdownAndExit() {
+  if (process.env.CAPTURE_SMOKE_SHUTDOWN_CHAIN_FAILURE) {
+    throw new Error("injected capture shutdown chain failure");
+  }
   let exitCode = 0;
   try {
     if (engine) {
@@ -93,8 +108,11 @@ async function shutdownAndExit() {
         new Error(`Capture E2E teardown failed: ${errorMessage(error)}`),
       );
     } catch (artifactError) {
-      process.stderr.write(
-        `Capture teardown and failure-artifact write failed: ${errorMessage(artifactError)}\n`,
+      writeFailureSynchronously(
+        new AggregateError(
+          [error, artifactError],
+          "Capture teardown and failure-artifact write both failed.",
+        ),
       );
     }
   } finally {
@@ -105,13 +123,51 @@ async function shutdownAndExit() {
 }
 
 async function writeFailure(error) {
-  await writeFile(
-    outputPath,
-    JSON.stringify({
-      ok: false,
-      error: errorMessage(error),
-    }),
+  await writeArtifact({ ok: false, error: errorMessage(error) });
+}
+
+async function writeArtifact(value) {
+  if (artifactFailuresRemaining > 0) {
+    artifactFailuresRemaining -= 1;
+    throw new Error("injected capture artifact write failure");
+  }
+  await writeFile(outputPath, JSON.stringify(value));
+}
+
+function reportDetachedFailureAndExit(context, error) {
+  writeFailureSynchronously(
+    new Error(`${context}: ${errorMessage(error)}`),
   );
+  try {
+    lifecycleWindow?.destroy();
+  } catch (cleanupError) {
+    process.stderr.write(
+      `Capture terminal cleanup failed: ${errorMessage(cleanupError)}\n`,
+    );
+  }
+  lifecycleWindow = null;
+  process.exitCode = 1;
+  try {
+    app.exit(1);
+  } catch (exitError) {
+    process.stderr.write(
+      `Capture terminal Electron exit failed: ${errorMessage(exitError)}\n`,
+    );
+    process.exit(1);
+  }
+}
+
+function writeFailureSynchronously(error) {
+  try {
+    writeFileSync(
+      outputPath,
+      JSON.stringify({ ok: false, error: errorMessage(error) }),
+    );
+  } catch (artifactError) {
+    process.stderr.write(
+      `Capture terminal failure artifact write failed: ${errorMessage(artifactError)}\n`,
+    );
+  }
 }
 
 function withTimeout(promise, milliseconds) {
