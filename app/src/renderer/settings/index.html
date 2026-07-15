@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>WhisperDictation Settings</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">WhisperDictation</p>
+          <h1>Settings &amp; History</h1>
+        </div>
+        <button id="clear-history" class="danger" type="button">Clear History</button>
+      </header>
+
+      <section aria-labelledby="history-heading">
+        <div class="section-heading">
+          <h2 id="history-heading">Transcription history</h2>
+          <label class="search">
+            <span class="sr-only">Search history</span>
+            <input id="history-search" type="search" placeholder="Search history" />
+          </label>
+        </div>
+        <p id="error-message" class="error" role="alert" hidden></p>
+        <ol id="history-list" aria-live="polite"></ol>
+        <p id="empty-history" class="empty" hidden>No transcription history yet.</p>
+      </section>
+
+      <details>
+        <summary>Active configuration</summary>
+        <pre id="active-config"></pre>
+      </details>
+    </main>
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
