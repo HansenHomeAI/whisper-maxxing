@@ -11,6 +11,7 @@ const capturePagePath = requireEnvironment("CAPTURE_SMOKE_PAGE");
 app.setPath("userData", `${tempDirectory}/user-data`);
 
 let engine = null;
+let lifecycleWindow = null;
 let shutdownStarted = false;
 app.on("before-quit", (event) => {
   if (shutdownStarted) {
@@ -23,6 +24,12 @@ app.on("before-quit", (event) => {
 
 void app.whenReady().then(async () => {
   try {
+    lifecycleWindow = new BrowserWindow({
+      show: false,
+      width: 1,
+      height: 1,
+      webPreferences: { sandbox: true },
+    });
     const [{ CaptureEngine }, { RendererCaptureSource }] = await Promise.all([
       importModule(`${moduleRoot}/src/main/capture/captureEngine.js`),
       importModule(`${moduleRoot}/src/main/capture/rendererCaptureSource.js`),
@@ -91,6 +98,8 @@ async function shutdownAndExit() {
       );
     }
   } finally {
+    lifecycleWindow?.destroy();
+    lifecycleWindow = null;
     app.exit(exitCode);
   }
 }
