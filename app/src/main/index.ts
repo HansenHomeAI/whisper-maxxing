@@ -143,6 +143,11 @@ app.on("before-quit", (event) => {
   }
 });
 
+// Whisper Maxxing is a tray/daemon application. The hidden capture renderer is
+// intentionally recreated during audio recovery, so closing its BrowserWindow
+// must not terminate the process when it is temporarily the last window.
+app.on("window-all-closed", () => undefined);
+
 async function shutdown(): Promise<void> {
   const current = running;
   running = null;
