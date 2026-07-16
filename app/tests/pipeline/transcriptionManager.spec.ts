@@ -886,7 +886,6 @@ function makeConfig(
     preferredInputDevice: null,
     enforcePreferredInputDevice: false,
     prebufferMilliseconds: 1_000,
-    captureWhileIdle: true,
     audioBufferSizeFrames: 1_024,
     pollIntervalMilliseconds: 150,
     whisperServerBinary: "/unused/whisper-server",

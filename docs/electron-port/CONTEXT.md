@@ -269,10 +269,6 @@ and remains the author's daily driver until sign-off.
 - D27: The application icon is a flat white outline microphone on a pure-black rounded
   square. The SVG is the canonical source; macOS ICNS and Windows ICO artifacts carry the
   same mark without gradients, borders, shadows, or accent colors.
-- D28: New installs capture audio on demand: the microphone stream opens after a dictation
-  shortcut and closes after stop or cancel, so macOS's orange microphone privacy indicator
-  is absent while idle. Legacy configs retain continuous prebuffer capture unless they set
-  `captureWhileIdle:false`; the system privacy indicator still appears during recording.
 
 ## Pathfinder findings
 
