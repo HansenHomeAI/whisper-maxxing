@@ -1,0 +1,68 @@
+# CONTEXT — Native macOS capture
+
+## Base and current architecture
+
+The immutable base is `e9239753c50bfd34cf526e85dbd82995728eebf2`. Electron currently
+constructs `RendererCaptureSource` in `app/src/main/index.ts`. It owns a hidden
+`BrowserWindow`, calls `getUserMedia`, and streams mono Int16 frames into `CaptureEngine`.
+`CaptureEngine` already owns readiness, one-second ring prebuffer, session samples, WAV
+writing, stall detection, restart policy, and error surfacing. A replacement only needs to
+implement the existing `CaptureSource` interface.
+
+The Swift reference uses AVAudioEngine, AVAudioConverter, and `CoreAudioDevice` to capture
+and convert the selected input to 16 kHz mono Int16. `Sources/`, `Tests/`, root
+`Package.swift`, `hammerspoon/`, and `launchd/` remain read-only.
+
+## Native helper protocol
+
+The executable product is `whisper-mac-capture` under the nested Swift package
+`app/native/macos-capture`. Normal mode captures a real device. `--self-test` emits a
+deterministic ready frame, deterministic nonzero PCM, and stopped frame without opening a
+device; CI uses it only to validate the transport. `--version` prints the protocol version.
+
+stdout contains frames only: one-byte type, four-byte little-endian payload length, then
+payload. Types: `1` ready JSON, `2` raw little-endian Int16 PCM, `3` error JSON, `4` stopped
+with an empty payload. Payloads are limited to 262144 bytes. Ready JSON contains
+`protocolVersion:1`, `sampleRateHz:16000`, `channels:1`, `sampleFormat:"s16le"`, and
+`defaultInputDeviceName`. Logs use stderr.
+
+Real PCM is aggregated into 320-sample/20 ms chunks. A dedicated serial output queue is
+bounded to 100 frames. Overflow emits an error and exits nonzero; frames are never silently
+dropped. Input device arguments are passed as argv values, never through a shell.
+
+## Platform and lifecycle
+
+`macCaptureBackend` is optional and defaults to `native`. On Darwin, `native` selects the
+helper and `electron` is an explicit emergency fallback. Windows and other platforms always
+select `electron-renderer`, even if a config contains `native`. There is no automatic native
+failure fallback. The status response adds `captureBackend`.
+
+The adapter handles fragmented and coalesced stdout, rejects unknown types, oversized
+payloads, odd PCM lengths, invalid ready JSON, premature exits, and frames after stopped.
+`stop()` sends SIGTERM, waits one second, then SIGKILLs and waits again. Cleanup is
+idempotent. Unexpected exit or protocol error invokes `onError`, which enters the existing
+visible CaptureEngine recovery path.
+
+Development resolves the helper from the nested release build. Packaged macOS resolves it
+at `process.resourcesPath/bin/whisper-mac-capture`. Windows never compiles or packages it.
+
+## Decisions
+
+- D28: D1 in `docs/electron-port/CONTEXT.md` is superseded only on macOS. Windows retains
+  renderer capture unchanged.
+- D29: `macCaptureBackend` is `native | electron`, optional/default native. Windows ignores
+  it and always uses renderer capture.
+- D30: Native failure is visible and retries native; no silent renderer fallback.
+- D31: The internal helper wire protocol is the framed binary protocol above.
+- D32: The queue is bounded to 100 20 ms frames; overflow is fatal and observable.
+- D33: Existing preferred-device semantics remain; no built-in microphone is forced.
+- D34: `captureBackend` is an additive control-status field.
+- D35: macOS builds bundle the helper; Windows builds do not invoke Swift or contain it.
+- D36: Live visual proof uses real screen pixels, a clean baseline, an Electron positive
+  control, Retina-normalized component thresholds, and a native target.
+- D37: AVAudioEngine is first. AUHAL is the fixed second implementation only if the
+  pathfinder proves AVAudioEngine still produces the large pill.
+
+## Prep commit
+
+`PREP_COMMIT` is filled by the core agent immediately after committing the acceptance floor.

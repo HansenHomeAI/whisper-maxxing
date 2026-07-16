@@ -1,0 +1,15 @@
+3c5cb30e5d841021a2872013a684bec3f887ca1313dadd1d402d866b2a2c553f  acceptance/contract.json
+00b4265ca44fbf304cc475f9815dd6d317e830d11f1b95678359a5336165fe3e  ../../app/package.json
+6919cf3ab48bcbf14ccd076a45fe50c5fec80b0727895d812e690b99df92ea90  ../../app/tests/acceptance/macos-native-capture/MacAcceptanceProbe.swift
+b2069516385ae202a454f560d988ade7493751a34c5336a8909ba341840aeea5  ../../app/tests/acceptance/macos-native-capture/config-status.spec.ts
+1606761480780febf6d0b41f8936e13f8f15e283873a6b8010f5f2acb10cc4b2  ../../app/tests/acceptance/macos-native-capture/live-gate.mjs
+6e7500dd097a6165a25b33aa41afb2c5d4af13fb059abbd138a89c245d03983e  ../../app/tests/acceptance/macos-native-capture/native-capture.spec.ts
+22fc41076b2527ab1220a99850b7b01a4a468f25baf847590f0b57d67f7f1792  ../../app/tests/acceptance/macos-native-capture/verify-build-orchestrator.mjs
+651b665bb44475acb6bda8a09807e03dd583a54ea8b59d3761c0249c58ea9501  ../../app/tests/acceptance/macos-native-capture/verify-helper.mjs
+960522dcf359f5f0a043206f49b48ee2deb1b8e7ef062cd2e1ebec82e5a7a8da  ../../scripts/accept-st-m1-native-helper.sh
+026b8ca051e221454dd2eb8dff7830f7a01b2b4db6a2d1e5bbf5cc0d1e6ed879  ../../scripts/accept-st-m2-electron-adapter.sh
+08047f363ebb183cc1a0d7ec3c23990457a77d4ad1cd515e0393dc88f77da98f  ../../scripts/accept-st-m3-build-orchestrator.sh
+fc2e06884b039039c50572b064d1862d380c8d4a1aaa68860adedb4c56b681f5  ../../scripts/accept-st-m4-packaging-ci.sh
+a41689f0fd47d54d860cf8a38360bd89f55f5f611604fb8360eec922d2804300  ../../scripts/verify-macos-native-capture.sh
+8738c41920673ccaf0d0ddf17d37a0c3a2315090251c672b0b7fa6e775a443dc  ../../scripts/verify-macos-native-capture-live.sh
+0b4db5aec43fc7f6453222e24404b596b02fe7d345a8a72bfb981c88a8129178  ../../scripts/verify-electron-ci-tip.sh

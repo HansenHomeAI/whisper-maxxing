@@ -1,0 +1,35 @@
+{
+  "baseCommit": "e9239753c50bfd34cf526e85dbd82995728eebf2",
+  "branch": "feature/macos-native-capture",
+  "protocol": {
+    "version": 1,
+    "headerBytes": 5,
+    "payloadLengthEndian": "little",
+    "maximumPayloadBytes": 262144,
+    "messageTypes": { "ready": 1, "pcm": 2, "error": 3, "stopped": 4 },
+    "sampleRateHz": 16000,
+    "channels": 1,
+    "sampleFormat": "s16le",
+    "frameSamples": 320,
+    "maximumQueuedFrames": 100
+  },
+  "platforms": {
+    "darwinDefault": "native-macos",
+    "darwinExplicitElectron": "electron-renderer",
+    "win32": "electron-renderer",
+    "linux": "electron-renderer"
+  },
+  "visual": {
+    "minimumLargeWidthPoints": 36,
+    "minimumLargeHeightPoints": 20,
+    "minimumLargeAreaPointsSquared": 500,
+    "baselineLargeComponentCount": 0,
+    "electronControlMinimumLargeComponentCount": 1,
+    "nativeTargetLargeComponentCount": 0
+  },
+  "prebufferMilliseconds": { "minimum": 900, "maximum": 1100 },
+  "packaging": {
+    "macResource": "bin/whisper-mac-capture",
+    "windowsMustExclude": "whisper-mac-capture"
+  }
+}
