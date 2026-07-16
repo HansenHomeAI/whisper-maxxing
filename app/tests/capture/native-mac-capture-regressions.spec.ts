@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { join } from "node:path";
+import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
@@ -261,7 +261,7 @@ describe("native macOS capture regressions", () => {
       isPackaged: false,
       resourcesPath: "/resources",
       appRoot: "/repo/app",
-    })).toBe(join(
+    })).toBe(resolve(
       "/repo/app",
       "native/macos-capture/.build/release/whisper-mac-capture",
     ));
