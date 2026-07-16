@@ -13,7 +13,7 @@ import {
 } from "../core/index.js";
 import {
   CaptureEngine,
-  RendererCaptureSource,
+  createCaptureSource,
 } from "./capture/index.js";
 import { ElectronDaemon } from "./daemon.js";
 import {
@@ -81,8 +81,15 @@ async function startApplication(): Promise<void> {
       .then(() => overlay.showAlert(error.message))
       .catch((alertError: unknown) => console.error(alertError));
   };
+  const captureSource = createCaptureSource({
+    platform: process.platform,
+    macCaptureBackend: config.macCaptureBackend ?? "native",
+    isPackaged: app.isPackaged,
+    resourcesPath: process.resourcesPath,
+    appRoot: app.getAppPath(),
+  });
   const captureEngine = new CaptureEngine({
-    source: new RendererCaptureSource(),
+    source: captureSource.source,
     config,
     onError: reportError,
   });
@@ -95,6 +102,7 @@ async function startApplication(): Promise<void> {
   const daemon = new ElectronDaemon({
     config,
     captureEngine,
+    captureBackend: captureSource.backend,
     openSettings: () =>
       history.openSettingsHandler({ command: "openSettings" }),
     onCompleted: history.recordSuccessfulResult,
