@@ -5,13 +5,17 @@ export const DEFAULT_ROBUST_SERVER_REQUEST_TIMEOUT_SECONDS = 120;
 export const DEFAULT_CLI_TIMEOUT_SECONDS = 90;
 export const DEFAULT_ROBUST_WHISPER_SERVER_PORT = 8_178;
 export const DEFAULT_WARM_ROBUST_SERVER_ON_LAUNCH = false;
+export const DEFAULT_MAC_CAPTURE_BACKEND = "native" as const;
 export const ALLOWED_CONTROL_HOSTS = ["127.0.0.1", "localhost", "::1"] as const;
+
+export type MacCaptureBackend = "native" | "electron";
 
 export interface AppConfig {
   controlHost: string;
   controlPort: number;
   preferredInputDevice: string | null;
   enforcePreferredInputDevice: boolean;
+  macCaptureBackend?: MacCaptureBackend;
   prebufferMilliseconds: number;
   audioBufferSizeFrames: number;
   pollIntervalMilliseconds: number;
@@ -91,6 +95,7 @@ export function parseAppConfig(value: unknown): AppConfig {
       source,
       "enforcePreferredInputDevice",
     ),
+    macCaptureBackend: optionalMacCaptureBackend(source),
     prebufferMilliseconds: requireInteger(source, "prebufferMilliseconds"),
     audioBufferSizeFrames: requireInteger(source, "audioBufferSizeFrames"),
     pollIntervalMilliseconds: requireInteger(source, "pollIntervalMilliseconds"),
@@ -136,6 +141,17 @@ export function parseAppConfig(value: unknown): AppConfig {
     robustServerRequestTimeoutSeconds,
     cliTimeoutSeconds,
   };
+}
+
+function optionalMacCaptureBackend(source: JsonObject): MacCaptureBackend {
+  const value = source.macCaptureBackend;
+  if (value === undefined || value === null) {
+    return DEFAULT_MAC_CAPTURE_BACKEND;
+  }
+  if (value !== "native" && value !== "electron") {
+    throw new Error("macCaptureBackend must be native or electron");
+  }
+  return value;
 }
 
 export function appPaths(config: AppConfig): AppPaths {

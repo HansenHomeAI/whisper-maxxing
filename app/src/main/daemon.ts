@@ -5,6 +5,7 @@ import {
   SessionResultBuffer,
   appPaths,
   type AppConfig,
+  type CaptureBackend,
   type ControlRequest,
   type ControlResponse,
   type SessionResultPayload,
@@ -25,6 +26,7 @@ const LOW_DISK_SPACE_BYTES = 512 * 1024 * 1024;
 export interface ElectronDaemonOptions {
   config: AppConfig;
   captureEngine: CaptureEngine;
+  captureBackend?: CaptureBackend;
   openSettings(): Promise<ControlResponse>;
   onCompleted?(result: SessionResultPayload): void | Promise<void>;
   requestQuit(): void | Promise<void>;
@@ -34,6 +36,7 @@ export interface ElectronDaemonOptions {
 export class ElectronDaemon {
   private readonly config: AppConfig;
   private readonly captureEngine: CaptureEngine;
+  private readonly captureBackend: CaptureBackend;
   private readonly openSettings: () => Promise<ControlResponse>;
   private readonly onCompleted: (
     result: SessionResultPayload,
@@ -48,6 +51,7 @@ export class ElectronDaemon {
   constructor(options: ElectronDaemonOptions) {
     this.config = options.config;
     this.captureEngine = options.captureEngine;
+    this.captureBackend = options.captureBackend ?? "electron-renderer";
     this.openSettings = options.openSettings;
     this.onCompleted = options.onCompleted ?? (() => undefined);
     this.requestQuit = options.requestQuit;
@@ -201,6 +205,7 @@ export class ElectronDaemon {
         this.captureEngine.prebufferAvailableMilliseconds(),
       preferredInputDevice: this.config.preferredInputDevice,
       defaultInputDevice: this.captureEngine.defaultInputDeviceName,
+      captureBackend: this.captureBackend,
       serverState: this.transcriptionManager.currentServerState("fast"),
       robustServerState:
         this.transcriptionManager.currentServerState("robust"),

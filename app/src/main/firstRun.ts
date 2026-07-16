@@ -155,6 +155,7 @@ function createDefaultConfig(
     controlPort: 44_124,
     preferredInputDevice: null,
     enforcePreferredInputDevice: false,
+    macCaptureBackend: "native",
     prebufferMilliseconds: 1_000,
     audioBufferSizeFrames: 128,
     pollIntervalMilliseconds: 150,

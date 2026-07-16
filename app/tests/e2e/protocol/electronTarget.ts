@@ -58,6 +58,7 @@ export async function startManagedElectronTarget(
         controlPort: target.port,
         preferredInputDevice: "Fake Default Audio Input",
         enforcePreferredInputDevice: false,
+        macCaptureBackend: "electron",
         prebufferMilliseconds: 1_000,
         audioBufferSizeFrames: 128,
         pollIntervalMilliseconds: 150,

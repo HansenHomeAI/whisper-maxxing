@@ -1,4 +1,5 @@
 export type TranscriptionProfile = "fast" | "robust";
+export type CaptureBackend = "native-macos" | "electron-renderer";
 
 export const CONTROL_COMMANDS = [
   "warmup",
@@ -55,6 +56,7 @@ export interface StatusPayload {
   prebufferAvailableMilliseconds: number;
   preferredInputDevice?: string | null;
   defaultInputDevice?: string | null;
+  captureBackend?: CaptureBackend | null;
   serverState: string;
   robustServerState?: string | null;
   availableDiskSpaceBytes?: number | null;
@@ -154,6 +156,7 @@ function validateStatus(value: unknown): void {
   optional(status, "engineStartupMilliseconds", requireNumberValue);
   optional(status, "preferredInputDevice", requireStringValue);
   optional(status, "defaultInputDevice", requireStringValue);
+  optional(status, "captureBackend", requireCaptureBackendValue);
   optional(status, "robustServerState", requireStringValue);
   optional(status, "availableDiskSpaceBytes", requireIntegerValue);
   optional(status, "lowDiskSpaceMessage", requireStringValue);
@@ -208,6 +211,12 @@ function optional(
 
 function requireStringValue(value: unknown): void {
   if (typeof value !== "string") {
+    throw decodingError();
+  }
+}
+
+function requireCaptureBackendValue(value: unknown): void {
+  if (value !== "native-macos" && value !== "electron-renderer") {
     throw decodingError();
   }
 }
