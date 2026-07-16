@@ -62,6 +62,15 @@ at `process.resourcesPath/bin/whisper-mac-capture`. Windows never compiles or pa
   control, Retina-normalized component thresholds, and a native target.
 - D37: AVAudioEngine is first. AUHAL is the fixed second implementation only if the
   pathfinder proves AVAudioEngine still produces the large pill.
+- D38: ST-M2 may own its implementation-specific regression file
+  `app/tests/capture/native-mac-capture-regressions.spec.ts`. Fresh review required these
+  lifecycle/parser assertions, the file does not overlap another agent, and it raises the
+  acceptance floor without changing any pinned test.
+- D39: The merge-gate AVAudioEngine run at ST-M1 SHA
+  `018dbacf7b81b4ee10e4ca43b1565b7730cae7bc` produced real PCM but also a pinned-probe
+  large orange component of 80×48 pixels and area 2,909 at 2× scale. D37 therefore
+  resolves to AUHAL. AVAudioEngine is no longer permitted as the final native capture
+  primitive or fallback.
 
 ## Prep commit
 
