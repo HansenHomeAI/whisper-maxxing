@@ -65,4 +65,5 @@ at `process.resourcesPath/bin/whisper-mac-capture`. Windows never compiles or pa
 
 ## Prep commit
 
-`PREP_COMMIT` is filled by the core agent immediately after committing the acceptance floor.
+`PREP_COMMIT=d527261f89802060ad9ee86587be1aaf8551cc44`. Every merge gate verifies the
+pinned acceptance files still match this commit.
