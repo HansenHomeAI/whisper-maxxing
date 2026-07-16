@@ -47,6 +47,9 @@ describe.sequential(`control protocol against ${target.target}`, () => {
     expect(response.ok).toBe(true);
     expect(response.status).toBeDefined();
     assertStatusContract(response.status as StatusPayload);
+    if (managedElectron !== null) {
+      expect(response.status?.prebufferAvailableMilliseconds).toBe(0);
+    }
   });
 
   test("start stop delivers exactly one result with capture metrics", async () => {

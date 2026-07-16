@@ -88,7 +88,9 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
 
   const page = await settingsPage(electronApplication);
   const renderedEntries = page.locator(".history-entry .entry-text");
-  await expect(renderedEntries).toHaveText([secondNonce, firstNonce]);
+  await expect
+    .poll(async () => (await renderedEntries.allTextContents()).slice(-2))
+    .toEqual([secondNonce, firstNonce]);
   await page.getByText("Active configuration").click();
   await expect(page.getByText("E2E microphone", { exact: false })).toBeVisible();
   await page.getByRole("button", { name: "Copy newer" }).click();

@@ -40,10 +40,12 @@ export class ElectronDaemon {
   ) => void | Promise<void>;
   private readonly requestQuit: () => void | Promise<void>;
   private readonly reportError: (error: Error) => void;
+  private readonly captureWhileIdle: boolean;
   private readonly completedResults = new SessionResultBuffer();
   private readonly transcriptionManager: TranscriptionManager;
   private readonly controlServer: JSONSocketServer;
   private disposePromise: Promise<void> | null = null;
+  private captureActivationPromise: Promise<void> | null = null;
 
   constructor(options: ElectronDaemonOptions) {
     this.config = options.config;
@@ -52,6 +54,7 @@ export class ElectronDaemon {
     this.onCompleted = options.onCompleted ?? (() => undefined);
     this.requestQuit = options.requestQuit;
     this.reportError = options.reportError ?? ((error) => console.error(error));
+    this.captureWhileIdle = this.config.captureWhileIdle;
     this.transcriptionManager = new TranscriptionManager({
       config: this.config,
       paths: appPaths(this.config),
@@ -67,7 +70,9 @@ export class ElectronDaemon {
   }
 
   async start(): Promise<void> {
-    await this.captureEngine.startAsync();
+    if (this.captureWhileIdle) {
+      await this.captureEngine.startAsync();
+    }
     await this.controlServer.start();
     void Promise.resolve()
       .then(() => this.transcriptionManager.prewarmServerIfNeeded())
@@ -110,8 +115,11 @@ export class ElectronDaemon {
     await disposePromise;
   }
 
-  private startCapture(profile: TranscriptionProfile): ControlResponse {
+  private async startCapture(
+    profile: TranscriptionProfile,
+  ): Promise<ControlResponse> {
     try {
+      await this.activateCaptureIfNeeded();
       const started = this.captureEngine.startSession(profile);
       return {
         ok: true,
@@ -121,6 +129,18 @@ export class ElectronDaemon {
         status: this.makeStatusPayload(true),
       };
     } catch (error) {
+      if (!this.captureWhileIdle && !this.captureEngine.isRecording()) {
+        try {
+          await this.captureEngine.dispose();
+        } catch (cleanupError) {
+          return failure(
+            new AggregateError(
+              [asError(error), asError(cleanupError)],
+              "Audio capture start and cleanup both failed.",
+            ),
+          );
+        }
+      }
       return failure(error);
     }
   }
@@ -130,6 +150,9 @@ export class ElectronDaemon {
       const capture = await this.captureEngine.stopSession(discard);
       if (capture !== null) {
         this.transcriptionManager.enqueue(await transcriptionCapture(capture));
+      }
+      if (!this.captureWhileIdle) {
+        await this.captureEngine.dispose();
       }
       const response: ControlResponse = {
         ok: true,
@@ -190,13 +213,20 @@ export class ElectronDaemon {
 
   private makeStatusPayload(recording: boolean): StatusPayload {
     const readiness = this.captureEngine.readinessAssessment();
+    const readyOnDemand =
+      !this.captureWhileIdle &&
+      !recording &&
+      this.captureActivationPromise === null;
     return {
       recording,
       recordingProfile: this.captureEngine.currentRecordingProfile(),
       pendingCount: this.outstandingResultCount(),
-      engineReady: readiness.ready,
-      engineHealthMessage: captureHealthMessage(readiness.reason),
-      engineStartupMilliseconds: this.captureEngine.engineStartupMilliseconds,
+      engineReady: readyOnDemand || readiness.ready,
+      engineHealthMessage: readyOnDemand
+        ? null
+        : captureHealthMessage(readiness.reason),
+      engineStartupMilliseconds:
+        this.captureEngine.engineStartupMilliseconds ?? 0,
       prebufferAvailableMilliseconds:
         this.captureEngine.prebufferAvailableMilliseconds(),
       preferredInputDevice: this.config.preferredInputDevice,
@@ -238,6 +268,25 @@ export class ElectronDaemon {
     return (
       this.transcriptionManager.pendingCount() + this.completedResults.count()
     );
+  }
+
+  private async activateCaptureIfNeeded(): Promise<void> {
+    if (this.captureWhileIdle || this.captureEngine.readinessAssessment().ready) {
+      return;
+    }
+    const existing = this.captureActivationPromise;
+    if (existing !== null) {
+      await existing;
+      return;
+    }
+    const activation = this.captureEngine.startAsync();
+    const tracked = activation.finally(() => {
+      if (this.captureActivationPromise === tracked) {
+        this.captureActivationPromise = null;
+      }
+    });
+    this.captureActivationPromise = tracked;
+    await tracked;
   }
 
   private scheduleQuit(): void {
