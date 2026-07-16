@@ -354,7 +354,6 @@ function configFor(root: string, port: number): AppConfig {
     preferredInputDevice: null,
     enforcePreferredInputDevice: false,
     prebufferMilliseconds: 1_000,
-    captureWhileIdle: true,
     audioBufferSizeFrames: 1_024,
     pollIntervalMilliseconds: 150,
     whisperServerBinary: "/fake/whisper-server",
