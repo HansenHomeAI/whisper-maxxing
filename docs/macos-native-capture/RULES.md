@@ -26,3 +26,13 @@ only the files in their brief. Never stash, reset, rebase, clean, or rewrite his
 
 The core agent may append clarifications after a failure mode repeats twice. An amendment
 may clarify implementation but never narrow scope or weaken acceptance.
+
+### A1 — The final helper must use AUHAL input
+
+Two real AVAudioEngine capture checks produced inconsistent menu-bar results; the merge-gate
+run at ST-M1 SHA `018dbacf7b81b4ee10e4ca43b1565b7730cae7bc` conclusively produced a
+`80×48` pixel orange component (`2×` scale, `2,909` pixels) and the visible large Mic
+Mode pill. The helper must therefore use AUHAL for input capture. AVAudioEngine may not
+remain as the capture primitive or an automatic fallback. ST-M1 is not mergeable until a
+fresh baseline-subtracted pinned-probe run reports zero large components while the same run
+proves real nonzero PCM and a clean stopped frame.
