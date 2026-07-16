@@ -57,8 +57,13 @@ export function resolveNativeMacCaptureBinary(
   if (options.isPackaged) {
     return join(options.resourcesPath, "bin", "whisper-mac-capture");
   }
+  if (options.appRoot === undefined || options.appRoot.trim().length === 0) {
+    throw new Error(
+      "Development native macOS capture requires an explicit appRoot.",
+    );
+  }
   return resolve(
-    options.appRoot ?? process.cwd(),
+    options.appRoot,
     "native",
     "macos-capture",
     ".build",

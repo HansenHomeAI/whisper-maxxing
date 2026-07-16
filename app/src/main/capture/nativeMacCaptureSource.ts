@@ -13,6 +13,7 @@ import {
 } from "./nativeMacCaptureProtocol.js";
 
 const DEFAULT_STOP_TIMEOUT_MILLISECONDS = 1_000;
+const MAXIMUM_DRAIN_FALLBACK_MILLISECONDS = 100;
 const MAXIMUM_STDERR_CONTEXT_BYTES = 8_192;
 
 interface NativeMacCaptureChildProcess {
@@ -22,12 +23,9 @@ interface NativeMacCaptureChildProcess {
   readonly exitCode: number | null;
   readonly signalCode: NodeJS.Signals | null;
   kill(signal?: NodeJS.Signals): boolean;
+  once(event: "error", listener: (error: Error) => void): this;
   once(
-    event: "error",
-    listener: (error: Error) => void,
-  ): this;
-  once(
-    event: "exit",
+    event: "exit" | "close",
     listener: (code: number | null, signal: NodeJS.Signals | null) => void,
   ): this;
 }
@@ -48,11 +46,20 @@ interface NativeCaptureState {
   startOptions: CaptureSourceStartOptions;
   startDeferred: Deferred<CaptureSourceInfo>;
   exitDeferred: Deferred<void>;
+  finalizedDeferred: Deferred<void>;
   startSettled: boolean;
-  exitSettled: boolean;
-  stopping: boolean;
-  failureSurfaced: boolean;
-  ignoreFrames: boolean;
+  exitObserved: boolean;
+  exitCode: number | null;
+  exitSignal: NodeJS.Signals | null;
+  stdoutDrained: boolean;
+  childClosed: boolean;
+  finalized: boolean;
+  cleanupStarted: boolean;
+  cleanupRequiresStopped: boolean;
+  cleanupPromise: Promise<void> | null;
+  failurePromise: Promise<void> | null;
+  protocolError: Error | null;
+  drainFallback: ReturnType<typeof setTimeout> | null;
   stderrContext: Buffer;
 }
 
@@ -68,9 +75,13 @@ export class NativeMacCaptureSource implements CaptureSource {
     NativeMacCaptureSourceOptions["spawnProcess"]
   >;
   private readonly stopTimeoutMilliseconds: number;
+  private readonly drainFallbackMilliseconds: number;
+  private readonly usesInjectedSpawner: boolean;
   private readonly now: () => number;
   private active: NativeCaptureState | null = null;
-  private stopPromise: Promise<void> | null = null;
+  private commandTail: Promise<void> = Promise.resolve();
+  private queuedCommandCount = 0;
+  private commandGeneration = 0;
 
   constructor(options: NativeMacCaptureSourceOptions) {
     if (options.binaryPath.trim().length === 0) {
@@ -85,8 +96,13 @@ export class NativeMacCaptureSource implements CaptureSource {
       throw new Error("Native macOS capture stop timeout must be positive.");
     }
     this.binaryPath = options.binaryPath;
+    this.usesInjectedSpawner = options.spawnProcess !== undefined;
     this.spawnProcess = options.spawnProcess ?? spawnNativeCaptureProcess;
     this.stopTimeoutMilliseconds = stopTimeoutMilliseconds;
+    this.drainFallbackMilliseconds = Math.min(
+      stopTimeoutMilliseconds,
+      MAXIMUM_DRAIN_FALLBACK_MILLISECONDS,
+    );
     this.now = options.now ?? (() => performance.now());
   }
 
@@ -95,35 +111,45 @@ export class NativeMacCaptureSource implements CaptureSource {
   }
 
   start(options: CaptureSourceStartOptions): Promise<CaptureSourceInfo> {
-    if (this.active !== null || this.stopPromise !== null) {
-      return this.stop().then(() => this.startNow(options));
+    const generation = ++this.commandGeneration;
+    if (this.active === null && this.queuedCommandCount === 0) {
+      return this.startNow(options);
     }
-    return this.startNow(options);
+
+    const result = deferred<CaptureSourceInfo>();
+    void this.enqueueCommand(async () => {
+      if (generation !== this.commandGeneration) {
+        result.reject(supersededStartError());
+        return;
+      }
+      try {
+        await this.stopActive(
+          new Error("Native macOS capture was replaced by a newer start."),
+        );
+      } catch (error) {
+        result.reject(toError(error));
+        return;
+      }
+      if (generation !== this.commandGeneration) {
+        result.reject(supersededStartError());
+        return;
+      }
+      this.startNow(options).then(result.resolve, result.reject);
+    });
+    return result.promise;
   }
 
   stop(): Promise<void> {
-    if (this.stopPromise !== null) {
-      return this.stopPromise;
+    ++this.commandGeneration;
+    const cancellation = new Error(
+      "Native macOS capture stopped during startup.",
+    );
+    if (this.queuedCommandCount === 0) {
+      return this.stopActive(cancellation);
     }
-    const state = this.active;
-    if (state === null) {
-      return Promise.resolve();
-    }
-    state.stopping = true;
-    state.ignoreFrames = true;
-    if (!state.startSettled) {
-      this.rejectStart(
-        state,
-        new Error("Native macOS capture stopped during startup."),
-      );
-    }
-    const stopping = this.stopState(state).finally(() => {
-      if (this.stopPromise === stopping) {
-        this.stopPromise = null;
-      }
+    return this.enqueueCommand(async () => {
+      await this.stopActive(cancellation);
     });
-    this.stopPromise = stopping;
-    return stopping;
   }
 
   private startNow(options: CaptureSourceStartOptions): Promise<CaptureSourceInfo> {
@@ -146,17 +172,41 @@ export class NativeMacCaptureSource implements CaptureSource {
       startOptions: options,
       startDeferred: deferred<CaptureSourceInfo>(),
       exitDeferred: deferred<void>(),
+      finalizedDeferred: deferred<void>(),
       startSettled: false,
-      exitSettled: false,
-      stopping: false,
-      failureSurfaced: false,
-      ignoreFrames: false,
+      exitObserved: false,
+      exitCode: null,
+      exitSignal: null,
+      stdoutDrained: false,
+      childClosed: false,
+      finalized: false,
+      cleanupStarted: false,
+      cleanupRequiresStopped: false,
+      cleanupPromise: null,
+      failurePromise: null,
+      protocolError: null,
+      drainFallback: null,
       stderrContext: Buffer.alloc(0),
     };
     this.active = state;
 
     child.stdout.on("data", (chunk: Buffer | string) => {
       this.handleStdout(state, chunk);
+    });
+    child.stdout.once("end", () => {
+      this.handleStdoutDrained(state);
+    });
+    child.stdout.once("close", () => {
+      this.handleStdoutDrained(state);
+    });
+    child.stdout.once("error", (error) => {
+      this.handleProtocolFailure(
+        state,
+        new Error(
+          `Native macOS capture stdout failed: ${toError(error).message}`,
+          { cause: error },
+        ),
+      );
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.handleStderr(state, chunk);
@@ -166,6 +216,9 @@ export class NativeMacCaptureSource implements CaptureSource {
     });
     child.once("exit", (code, signal) => {
       this.handleExit(state, code, signal);
+    });
+    child.once("close", (code, signal) => {
+      this.handleClose(state, code, signal);
     });
 
     if (child.exitCode !== null || child.signalCode !== null) {
@@ -180,7 +233,7 @@ export class NativeMacCaptureSource implements CaptureSource {
     state: NativeCaptureState,
     chunk: Buffer | string,
   ): void {
-    if (state.exitSettled || state.ignoreFrames) {
+    if (state.finalized || state.protocolError !== null) {
       return;
     }
     let messages: NativeMacCaptureMessage[];
@@ -189,8 +242,7 @@ export class NativeMacCaptureSource implements CaptureSource {
         typeof chunk === "string" ? Buffer.from(chunk) : chunk,
       );
     } catch (error) {
-      state.ignoreFrames = true;
-      this.surfaceFailure(
+      this.handleProtocolFailure(
         state,
         new Error(
           `Native macOS capture protocol error: ${toError(error).message}`,
@@ -201,9 +253,6 @@ export class NativeMacCaptureSource implements CaptureSource {
     }
 
     for (const message of messages) {
-      if (state.ignoreFrames) {
-        return;
-      }
       this.handleMessage(state, message);
     }
   }
@@ -212,6 +261,9 @@ export class NativeMacCaptureSource implements CaptureSource {
     state: NativeCaptureState,
     message: NativeMacCaptureMessage,
   ): void {
+    if (state.failurePromise !== null && message.type !== "stopped") {
+      return;
+    }
     switch (message.type) {
       case "ready":
         if (!state.startSettled) {
@@ -229,35 +281,52 @@ export class NativeMacCaptureSource implements CaptureSource {
         try {
           state.startOptions.onFrame(frame);
         } catch (error) {
-          state.ignoreFrames = true;
-          this.surfaceFailure(
+          this.beginFailure(
             state,
             new Error(
               `Native macOS capture frame consumer failed: ${toError(error).message}`,
               { cause: error },
             ),
+            true,
           );
         }
         return;
       }
       case "error":
-        state.ignoreFrames = true;
-        this.surfaceFailure(
+        this.beginFailure(
           state,
           new Error(`Native macOS capture helper error: ${message.message}`),
+          true,
         );
         return;
       case "stopped":
-        state.ignoreFrames = true;
+        if (!state.cleanupStarted) {
+          this.beginFailure(
+            state,
+            new Error("Native macOS capture helper stopped unexpectedly."),
+            true,
+          );
+        }
         return;
     }
+  }
+
+  private handleProtocolFailure(
+    state: NativeCaptureState,
+    error: Error,
+  ): void {
+    if (state.protocolError !== null) {
+      return;
+    }
+    state.protocolError = error;
+    this.beginFailure(state, error, false);
   }
 
   private handleStderr(
     state: NativeCaptureState,
     chunk: Buffer | string,
   ): void {
-    if (state.exitSettled) {
+    if (state.finalized) {
       return;
     }
     const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
@@ -267,19 +336,20 @@ export class NativeMacCaptureSource implements CaptureSource {
   }
 
   private handleProcessError(state: NativeCaptureState, error: Error): void {
-    if (state.exitSettled) {
+    if (state.finalized) {
       return;
     }
-    this.finishExit(state);
-    if (!state.stopping) {
-      this.surfaceFailure(
-        state,
-        new Error(
-          `Native macOS capture helper process failed: ${error.message}`,
-          { cause: error },
-        ),
-      );
+    if (state.child.pid === undefined) {
+      this.observeExit(state, state.child.exitCode, state.child.signalCode);
     }
+    this.beginFailure(
+      state,
+      new Error(
+        `Native macOS capture helper process failed: ${error.message}`,
+        { cause: error },
+      ),
+      false,
+    );
   }
 
   private handleExit(
@@ -287,46 +357,214 @@ export class NativeMacCaptureSource implements CaptureSource {
     code: number | null,
     signal: NodeJS.Signals | null,
   ): void {
-    if (state.exitSettled) {
-      return;
-    }
-    let protocolError: Error | null = null;
-    try {
-      state.parser.finish();
-    } catch (error) {
-      protocolError = new Error(
-        `Native macOS capture protocol error: ${toError(error).message}`,
-        { cause: error },
-      );
-    }
-    this.finishExit(state);
-    if (state.stopping) {
-      return;
-    }
-    const error =
-      protocolError ??
-      new Error(
-        `Native macOS capture helper exited unexpectedly ${formatExit(code, signal)}${formatStderr(state.stderrContext)}.`,
-      );
-    this.surfaceFailure(state, error);
+    this.observeExit(state, code, signal);
   }
 
-  private finishExit(state: NativeCaptureState): void {
-    state.exitSettled = true;
-    state.ignoreFrames = true;
-    state.exitDeferred.resolve();
+  private handleClose(
+    state: NativeCaptureState,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    state.childClosed = true;
+    this.observeExit(state, code, signal);
+    this.finalizeState(state);
+  }
+
+  private observeExit(
+    state: NativeCaptureState,
+    code: number | null,
+    signal: NodeJS.Signals | null,
+  ): void {
+    if (!state.exitObserved) {
+      state.exitObserved = true;
+      state.exitCode = code;
+      state.exitSignal = signal;
+      state.exitDeferred.resolve();
+      if (this.usesInjectedSpawner) {
+        state.drainFallback = setTimeout(() => {
+          this.finalizeState(state);
+        }, this.drainFallbackMilliseconds);
+      }
+      void state.finalizedDeferred.promise.then(() => {
+        if (!state.cleanupStarted && state.failurePromise === null) {
+          this.beginFailure(
+            state,
+            new Error(
+              `Native macOS capture helper exited unexpectedly ${formatExit(state.exitCode, state.exitSignal)}${formatStderr(state.stderrContext)}.`,
+            ),
+            true,
+          );
+        }
+      });
+    }
+    if (state.stdoutDrained || state.childClosed) {
+      this.finalizeState(state);
+    }
+  }
+
+  private handleStdoutDrained(state: NativeCaptureState): void {
+    state.stdoutDrained = true;
+    if (state.exitObserved) {
+      this.finalizeState(state);
+    }
+  }
+
+  private finalizeState(state: NativeCaptureState): void {
+    if (state.finalized || !state.exitObserved) {
+      return;
+    }
+    if (state.drainFallback !== null) {
+      clearTimeout(state.drainFallback);
+      state.drainFallback = null;
+    }
+    if (state.protocolError === null) {
+      try {
+        state.parser.finish();
+      } catch (error) {
+        state.protocolError = new Error(
+          `Native macOS capture protocol error: ${toError(error).message}`,
+          { cause: error },
+        );
+      }
+    }
+    state.finalized = true;
+    state.finalizedDeferred.resolve();
     if (this.active === state) {
       this.active = null;
     }
   }
 
-  private surfaceFailure(state: NativeCaptureState, error: Error): void {
-    this.rejectStart(state, error);
-    if (state.failureSurfaced) {
+  private beginFailure(
+    state: NativeCaptureState,
+    error: Error,
+    requireStopped: boolean,
+  ): void {
+    if (state.failurePromise !== null) {
+      state.cleanupRequiresStopped ||= requireStopped;
       return;
     }
-    state.failureSurfaced = true;
-    state.startOptions.onError(error);
+    const completion = deferred<void>();
+    state.failurePromise = completion.promise;
+    void (async () => {
+      let surfacedError = error;
+      try {
+        await this.cleanupState(state, requireStopped);
+      } catch (cleanupError) {
+        surfacedError = combineErrors(
+          error,
+          toError(cleanupError),
+          "Native macOS capture failed and cleanup did not complete cleanly.",
+        );
+      }
+      this.rejectStart(state, surfacedError);
+      state.startOptions.onError(surfacedError);
+    })().then(completion.resolve, completion.reject);
+  }
+
+  private stopActive(cancellation: Error): Promise<void> {
+    const state = this.active;
+    if (state === null) {
+      return Promise.resolve();
+    }
+    const stopping = this.cleanupState(state, true);
+    return stopping.then(
+      () => {
+        this.rejectStart(state, cancellation);
+      },
+      (cleanupError: unknown) => {
+        const cleanup = toError(cleanupError);
+        if (!state.startSettled) {
+          this.rejectStart(
+            state,
+            combineErrors(
+              cancellation,
+              cleanup,
+              "Native macOS capture cancellation and cleanup both failed.",
+            ),
+          );
+        }
+        throw cleanup;
+      },
+    );
+  }
+
+  private cleanupState(
+    state: NativeCaptureState,
+    requireStopped: boolean,
+  ): Promise<void> {
+    state.cleanupStarted = true;
+    state.cleanupRequiresStopped ||= requireStopped;
+    if (state.cleanupPromise !== null) {
+      return state.cleanupPromise;
+    }
+    const completion = deferred<void>();
+    state.cleanupPromise = completion.promise;
+    void this.runCleanup(state).then(completion.resolve, completion.reject);
+    return completion.promise;
+  }
+
+  private async runCleanup(state: NativeCaptureState): Promise<void> {
+    const errors: Error[] = [];
+    if (!state.exitObserved) {
+      try {
+        state.child.kill("SIGTERM");
+      } catch (error) {
+        errors.push(toError(error));
+      }
+    }
+    if (
+      !state.exitObserved &&
+      !(await waitFor(state.exitDeferred.promise, this.stopTimeoutMilliseconds))
+    ) {
+      try {
+        state.child.kill("SIGKILL");
+      } catch (error) {
+        errors.push(toError(error));
+      }
+      if (
+        !(await waitFor(
+          state.exitDeferred.promise,
+          this.stopTimeoutMilliseconds,
+        ))
+      ) {
+        errors.push(
+          new Error(
+            "Native macOS capture helper did not exit after SIGKILL and remains tracked.",
+          ),
+        );
+      }
+    }
+
+    if (state.exitObserved) {
+      await waitFor(
+        state.finalizedDeferred.promise,
+        this.usesInjectedSpawner
+          ? this.drainFallbackMilliseconds + 10
+          : this.stopTimeoutMilliseconds,
+      );
+      if (!state.finalized) {
+        errors.push(
+          new Error("Native macOS capture stdout did not finish draining."),
+        );
+      }
+    }
+    if (state.protocolError !== null) {
+      errors.push(state.protocolError);
+    }
+    if (
+      state.cleanupRequiresStopped &&
+      !state.parser.hasReceivedStopped
+    ) {
+      errors.push(
+        new Error(
+          "Native macOS capture helper exited without a valid stopped frame.",
+        ),
+      );
+    }
+    throwCollectedErrors(
+      errors,
+      "Native macOS capture helper cleanup failed.",
+    );
   }
 
   private rejectStart(state: NativeCaptureState, error: Error): void {
@@ -336,37 +574,16 @@ export class NativeMacCaptureSource implements CaptureSource {
     }
   }
 
-  private async stopState(state: NativeCaptureState): Promise<void> {
-    if (state.exitSettled) {
-      return;
-    }
-    const errors: Error[] = [];
-    try {
-      state.child.kill("SIGTERM");
-    } catch (error) {
-      errors.push(toError(error));
-    }
-    if (!(await waitForExit(state, this.stopTimeoutMilliseconds))) {
-      try {
-        state.child.kill("SIGKILL");
-      } catch (error) {
-        errors.push(toError(error));
-      }
-      if (!(await waitForExit(state, this.stopTimeoutMilliseconds))) {
-        errors.push(
-          new Error("Native macOS capture helper did not exit after SIGKILL."),
-        );
-      }
-    }
-    if (errors.length === 1) {
-      throw errors[0];
-    }
-    if (errors.length > 1) {
-      throw new AggregateError(
-        errors,
-        "Native macOS capture helper cleanup failed.",
-      );
-    }
+  private enqueueCommand<T>(operation: () => Promise<T>): Promise<T> {
+    this.queuedCommandCount += 1;
+    const result = this.commandTail.then(operation);
+    this.commandTail = result.then(
+      () => undefined,
+      () => undefined,
+    ).finally(() => {
+      this.queuedCommandCount -= 1;
+    });
+    return result;
   }
 }
 
@@ -404,17 +621,14 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-async function waitForExit(
-  state: NativeCaptureState,
+async function waitFor(
+  promise: Promise<void>,
   timeoutMilliseconds: number,
 ): Promise<boolean> {
-  if (state.exitSettled) {
-    return true;
-  }
   let timeout: ReturnType<typeof setTimeout> | null = null;
   try {
     return await Promise.race([
-      state.exitDeferred.promise.then(() => true),
+      promise.then(() => true),
       new Promise<boolean>((resolve) => {
         timeout = setTimeout(() => resolve(false), timeoutMilliseconds);
       }),
@@ -424,6 +638,10 @@ async function waitForExit(
       clearTimeout(timeout);
     }
   }
+}
+
+function supersededStartError(): Error {
+  return new Error("Native macOS capture start was superseded.");
 }
 
 function formatExit(
@@ -442,6 +660,35 @@ function formatExit(
 function formatStderr(stderr: Buffer): string {
   const context = stderr.toString("utf8").trim();
   return context.length === 0 ? "" : `; stderr: ${context}`;
+}
+
+function combineErrors(
+  primary: Error,
+  secondary: Error,
+  message: string,
+): Error {
+  if (primary === secondary) {
+    return primary;
+  }
+  return new AggregateError(
+    [primary, secondary],
+    `${message} ${primary.message} Cleanup: ${secondary.message}`,
+  );
+}
+
+function throwCollectedErrors(errors: Error[], message: string): void {
+  const unique = errors.filter(
+    (error, index) => errors.indexOf(error) === index,
+  );
+  if (unique.length === 1) {
+    throw unique[0];
+  }
+  if (unique.length > 1) {
+    throw new AggregateError(
+      unique,
+      `${message} ${unique.map((error) => error.message).join(" ")}`,
+    );
+  }
 }
 
 function toError(error: unknown): Error {

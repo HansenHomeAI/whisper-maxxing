@@ -150,6 +150,9 @@ export class NativeMacCaptureProtocolParser {
       case NativeMacCaptureMessageType.Error:
         return decodeError(payload);
       case NativeMacCaptureMessageType.Stopped:
+        if (!this.readyReceived) {
+          throw new Error("Native capture protocol received stopped before ready.");
+        }
         if (payload.byteLength !== 0) {
           throw new Error("Native capture stopped frame must have an empty payload.");
         }
@@ -206,9 +209,14 @@ function decodeReady(payload: Buffer): NativeMacCaptureReadyMessage {
 }
 
 function decodePcm(payload: Buffer): NativeMacCapturePcmMessage {
+  if (payload.byteLength === 0) {
+    throw new Error("Native capture PCM payload must not be empty.");
+  }
   if (payload.byteLength % Int16Array.BYTES_PER_ELEMENT !== 0) {
     throw new Error("Native capture PCM payload has an odd byte length.");
   }
+  // The helper enforces 320-sample emission. The transport parser intentionally
+  // accepts any nonempty even payload so transport tests can use compact frames.
   const samples = new Int16Array(
     payload.byteLength / Int16Array.BYTES_PER_ELEMENT,
   );
