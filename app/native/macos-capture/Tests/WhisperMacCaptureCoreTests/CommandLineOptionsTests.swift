@@ -35,6 +35,17 @@ struct CommandLineOptionsTests {
         #expect(throws: CommandLineError.missingValue("--preferred-input-device")) {
             try CommandLineOptions.parse(arguments: ["--preferred-input-device"])
         }
+        #expect(throws: CommandLineError.missingValue("--preferred-input-device")) {
+            try CommandLineOptions.parse(arguments: [
+                "--preferred-input-device",
+                "--self-test",
+            ])
+        }
+        #expect(throws: CommandLineError.enforcementRequiresPreferredInputDevice) {
+            try CommandLineOptions.parse(arguments: [
+                "--enforce-preferred-input-device",
+            ])
+        }
         #expect(throws: CommandLineError.conflictingModes) {
             try CommandLineOptions.parse(arguments: ["--self-test", "--version"])
         }

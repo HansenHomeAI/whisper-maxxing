@@ -49,8 +49,8 @@ public struct CommandLineOptions: Equatable, Sendable {
                     throw CommandLineError.missingValue(argument)
                 }
                 let value = arguments[index]
-                guard !value.isEmpty else {
-                    throw CommandLineError.emptyPreferredInputDevice
+                guard !value.isEmpty, !value.hasPrefix("--") else {
+                    throw CommandLineError.missingValue(argument)
                 }
                 preferredInputDevice = value
             case "--enforce-preferred-input-device":
@@ -67,6 +67,9 @@ public struct CommandLineOptions: Equatable, Sendable {
         if mode != .capture && (preferredInputDevice != nil || enforcePreferredInputDevice) {
             throw CommandLineError.modeDoesNotAcceptCaptureOptions
         }
+        if enforcePreferredInputDevice && preferredInputDevice == nil {
+            throw CommandLineError.enforcementRequiresPreferredInputDevice
+        }
 
         return CommandLineOptions(
             mode: mode,
@@ -80,9 +83,9 @@ public enum CommandLineError: Error, LocalizedError, Equatable {
     case unknownOption(String)
     case missingValue(String)
     case repeatedOption(String)
-    case emptyPreferredInputDevice
     case conflictingModes
     case modeDoesNotAcceptCaptureOptions
+    case enforcementRequiresPreferredInputDevice
 
     public var errorDescription: String? {
         switch self {
@@ -92,12 +95,12 @@ public enum CommandLineError: Error, LocalizedError, Equatable {
             return "Missing value for \(option)."
         case .repeatedOption(let option):
             return "Option may only be specified once: \(option)."
-        case .emptyPreferredInputDevice:
-            return "Preferred input device must not be empty."
         case .conflictingModes:
             return "--self-test and --version cannot be combined."
         case .modeDoesNotAcceptCaptureOptions:
             return "Capture device options cannot be used with --self-test or --version."
+        case .enforcementRequiresPreferredInputDevice:
+            return "--enforce-preferred-input-device requires --preferred-input-device."
         }
     }
 }

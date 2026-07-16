@@ -26,7 +26,7 @@ public final class FrameWriter: @unchecked Sendable {
     private var reportedWriteFailure = false
 
     public init(
-        maximumPendingPCMFrames: Int = 100,
+        maximumPendingPCMFrames: Int = CaptureProtocol.maximumQueuedPCMFrames,
         sink: @escaping Sink,
         writeFailureHandler: @escaping WriteFailureHandler
     ) {
@@ -142,6 +142,11 @@ public final class FrameWriter: @unchecked Sendable {
     }
 
     private func write(_ frame: Data) {
+        lock.lock()
+        let alreadyFailed = reportedWriteFailure
+        lock.unlock()
+        guard !alreadyFailed else { return }
+
         do {
             try sink(frame)
         } catch {

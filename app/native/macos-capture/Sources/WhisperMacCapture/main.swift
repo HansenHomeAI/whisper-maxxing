@@ -11,13 +11,14 @@ private final class CaptureApplication: @unchecked Sendable {
     }
 
     private let options: CommandLineOptions
+    private let standardOutput: BoundedOutput
     private let lifecycleQueue = DispatchQueue(label: "whisper.mac.capture.lifecycle")
     private var state = State.idle
     private var signalSources: [DispatchSourceSignal] = []
 
     private lazy var writer = FrameWriter(
-        sink: { data in
-            try FileHandle.standardOutput.write(contentsOf: data)
+        sink: { [standardOutput] data in
+            try standardOutput.write(data)
         },
         writeFailureHandler: { [weak self] error in
             self?.scheduleOutputWriteFailure(error)
@@ -42,8 +43,9 @@ private final class CaptureApplication: @unchecked Sendable {
         }
     )
 
-    init(options: CommandLineOptions) {
+    init(options: CommandLineOptions, standardOutput: BoundedOutput) {
         self.options = options
+        self.standardOutput = standardOutput
     }
 
     func run() -> Never {
@@ -76,7 +78,6 @@ private final class CaptureApplication: @unchecked Sendable {
         state = .ending
         capture.stop()
         outputPipeline.stop()
-        cancelSignalHandlers()
         writer.finishStopped {
             Darwin.exit(EXIT_SUCCESS)
         }
@@ -87,7 +88,6 @@ private final class CaptureApplication: @unchecked Sendable {
         state = .ending
         capture.stop()
         outputPipeline.stop()
-        cancelSignalHandlers()
         fputs("whisper-mac-capture: \(message)\n", stderr)
         writer.finishError(message: message) {
             Darwin.exit(EX_SOFTWARE)
@@ -129,22 +129,21 @@ private final class CaptureApplication: @unchecked Sendable {
             signalSources.append(source)
         }
     }
-
-    private func cancelSignalHandlers() {
-        signalSources.forEach { $0.cancel() }
-        signalSources.removeAll()
-    }
 }
 
-private func writeSelfTest() throws {
-    for frame in try SelfTest.frames() {
-        try FileHandle.standardOutput.write(contentsOf: frame)
+private func writeSelfTest(to output: BoundedOutput) throws -> Int {
+    let result = try SelfTest.run()
+    for frame in result.frames {
+        try output.write(frame)
     }
+    return result.assertionCount
 }
 
 private func printError(_ message: String) {
     fputs("whisper-mac-capture: \(message)\n", stderr)
 }
+
+Darwin.signal(SIGPIPE, SIG_IGN)
 
 let options: CommandLineOptions
 do {
@@ -156,16 +155,40 @@ do {
     Darwin.exit(EX_USAGE)
 }
 
+let standardOutput: BoundedOutput
+do {
+    standardOutput = try BoundedOutput()
+} catch {
+    printError("stdout setup failed: \(error.localizedDescription)")
+    Darwin.exit(EX_IOERR)
+}
+
 switch options.mode {
 case .version:
-    print(CaptureProtocol.version)
+    do {
+        try standardOutput.write(Data("\(CaptureProtocol.version)\n".utf8))
+    } catch {
+        printError("stdout write failed: \(error.localizedDescription)")
+        Darwin.exit(EX_IOERR)
+    }
 case .selfTest:
     do {
-        try writeSelfTest()
+        let assertionCount = try writeSelfTest(to: standardOutput)
+        fputs(
+            "whisper-mac-capture: self-test assertions passed: \(assertionCount) "
+                + "(protocol, chunking, CLI, ordering, queue bounds, bounded output)\n",
+            stderr
+        )
+    } catch let error as BoundedOutputError {
+        printError("stdout write failed: \(error.localizedDescription)")
+        Darwin.exit(EX_IOERR)
     } catch {
-        printError(error.localizedDescription)
+        printError("self-test failed: \(error.localizedDescription)")
         Darwin.exit(EX_IOERR)
     }
 case .capture:
-    CaptureApplication(options: options).run()
+    CaptureApplication(
+        options: options,
+        standardOutput: standardOutput
+    ).run()
 }

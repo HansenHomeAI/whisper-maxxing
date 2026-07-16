@@ -7,6 +7,7 @@ public enum CaptureProtocol {
     public static let sampleFormat = "s16le"
     public static let samplesPerFrame = 320
     public static let maximumPayloadBytes = 262_144
+    public static let maximumQueuedPCMFrames = 100
 
     public enum MessageType: UInt8, Sendable {
         case ready = 1

@@ -12,15 +12,19 @@ public final class CaptureOutputPipeline: @unchecked Sendable {
 
     private let writer: FrameWriter
     private let failureHandler: FailureHandler
+    private let maximumBufferedChunks: Int
     private let lock = NSLock()
     private var state = State.waitingForReady
     private var bufferedChunks: [[Int16]] = []
 
     public init(
         writer: FrameWriter,
+        maximumBufferedChunks: Int = CaptureProtocol.maximumQueuedPCMFrames,
         failureHandler: @escaping FailureHandler
     ) {
+        precondition(maximumBufferedChunks > 0)
         self.writer = writer
+        self.maximumBufferedChunks = maximumBufferedChunks
         self.failureHandler = failureHandler
     }
 
@@ -28,8 +32,14 @@ public final class CaptureOutputPipeline: @unchecked Sendable {
         lock.lock()
         switch state {
         case .waitingForReady:
-            bufferedChunks.append(samples)
+            if bufferedChunks.count < maximumBufferedChunks {
+                bufferedChunks.append(samples)
+                lock.unlock()
+                return
+            }
+            state = .failed
             lock.unlock()
+            failureHandler("Native capture pre-ready buffer overflowed.")
         case .active:
             lock.unlock()
             deliver(samples)
