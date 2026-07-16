@@ -1,5 +1,6 @@
 export const DEFAULT_PERSIST_RECENT_CAPTURES = false;
 export const DEFAULT_PERSIST_HISTORY = true;
+export const DEFAULT_CAPTURE_WHILE_IDLE = true;
 export const DEFAULT_SERVER_REQUEST_TIMEOUT_SECONDS = 30;
 export const DEFAULT_ROBUST_SERVER_REQUEST_TIMEOUT_SECONDS = 120;
 export const DEFAULT_CLI_TIMEOUT_SECONDS = 90;
@@ -13,6 +14,7 @@ export interface AppConfig {
   preferredInputDevice: string | null;
   enforcePreferredInputDevice: boolean;
   prebufferMilliseconds: number;
+  captureWhileIdle: boolean;
   audioBufferSizeFrames: number;
   pollIntervalMilliseconds: number;
   whisperServerBinary: string;
@@ -92,6 +94,11 @@ export function parseAppConfig(value: unknown): AppConfig {
       "enforcePreferredInputDevice",
     ),
     prebufferMilliseconds: requireInteger(source, "prebufferMilliseconds"),
+    captureWhileIdle: optionalBoolean(
+      source,
+      "captureWhileIdle",
+      DEFAULT_CAPTURE_WHILE_IDLE,
+    ),
     audioBufferSizeFrames: requireInteger(source, "audioBufferSizeFrames"),
     pollIntervalMilliseconds: requireInteger(source, "pollIntervalMilliseconds"),
     whisperServerBinary: requireString(source, "whisperServerBinary"),

@@ -223,6 +223,14 @@ describe("Swift core parity fixture", () => {
     });
   }
 
+  it("keeps legacy idle capture and accepts on-demand privacy mode", () => {
+    expect(parseAppConfig(baseConfig).captureWhileIdle).toBe(true);
+    expect(
+      parseAppConfig({ ...baseConfig, captureWhileIdle: false })
+        .captureWhileIdle,
+    ).toBe(false);
+  });
+
   for (const testCase of fixture.controlProtocol.cases) {
     it(testCase.name, () => {
       executedCaseCount += 1;

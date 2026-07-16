@@ -59,6 +59,7 @@ export async function startManagedElectronTarget(
         preferredInputDevice: "Fake Default Audio Input",
         enforcePreferredInputDevice: false,
         prebufferMilliseconds: 1_000,
+        captureWhileIdle: false,
         audioBufferSizeFrames: 128,
         pollIntervalMilliseconds: 150,
         whisperServerBinary: fakeServer,
@@ -99,8 +100,7 @@ export async function startManagedElectronTarget(
     appRoot,
     "tests",
     "fixtures",
-    "audio",
-    "prebuffer-marker.wav",
+    "known-good-mono.wav",
   );
   const args = [
     appRoot,

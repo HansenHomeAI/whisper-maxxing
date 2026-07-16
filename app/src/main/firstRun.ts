@@ -156,6 +156,7 @@ function createDefaultConfig(
     preferredInputDevice: null,
     enforcePreferredInputDevice: false,
     prebufferMilliseconds: 1_000,
+    captureWhileIdle: false,
     audioBufferSizeFrames: 128,
     pollIntervalMilliseconds: 150,
     whisperServerBinary: whisper.server,
