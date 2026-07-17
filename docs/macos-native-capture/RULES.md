@@ -107,3 +107,16 @@ nonzero helper outcome; cleanup errors may not be swallowed. Cancellation and cl
 must still produce one byte-complete terminal protocol frame—never a partial frame or a
 second terminal. Tests must exercise the before-submit, after-submit/before-connect, and
 connected-but-unresponsive races rather than relying on the normal fast startup path.
+
+### A8 — The worker owns orphan cleanup and stopped is the only terminal frame
+
+Supervisor-SIGKILL leakage recurred after A4: socket EOF stopped the launchd worker but
+left both its submitted label and private `/tmp/wmc-*` directory behind. The worker must
+distinguish a graceful supervisor control byte from orphaning socket EOF. On EOF it removes
+the private directory and its own launchd job without supervisor participation; normal
+shutdown remains race-safe with the supervisor's A7 cleanup. A real connected-worker test
+must SIGKILL the supervisor and prove the worker, job, socket, and directory all disappear.
+The Electron parser's existing acceptance floor also fixes the complete stream order as
+`ready`, zero or more `pcm`, optional `error`, then exactly one `stopped`; `error` is not a
+terminal frame, and neither startup cancellation nor startup failure may emit `stopped`
+before `ready`.
