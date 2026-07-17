@@ -91,6 +91,26 @@ at `process.resourcesPath/bin/whisper-mac-capture`. Windows never compiles or pa
   opens the device. The supervisor remains the direct `whisper-mac-capture` child expected by
   runtime cleanup; both the worker process and submitted job are removed on graceful stop,
   supervisor death, and application quit.
+- D43: ST-M1 merged at helper SHA `4a1ad51cac87b86d5f3efcd8bc0094def8e63643`.
+  A signed release binary copied outside the Documents worktree emitted 35 real 640-byte
+  PCM frames with 11,122 nonzero samples, one ready frame, exactly one stopped frame, no
+  error or trailing bytes, and no leaked process or launchd job. The pinned 2x detector
+  reported `largeComponentCount:0`; the earlier clean-baseline run isolated only the
+  10x10 yellow/orange audio privacy indicator. The purple screen-sharing indicator is a
+  separate macOS surface and is not an audio-detector component.
+- D44: The final capture primitive is AVAudioEngine inside the GUI-domain launchd worker.
+  The worker context, rather than changing the device or format contract, is what removes
+  the large Mic Mode pill. The direct Electron child remains a microphone-free protocol
+  supervisor.
+- D45: A worktree binary under Documents triggered an unrelated macOS Folder Access prompt.
+  The prompt was denied; the helper needs no Documents permission. Ad-hoc signing and
+  copying the acceptance binary under `/tmp` produced real PCM and the expected microphone
+  permission behavior without granting broader filesystem access.
+- D46: The complete helper stream is `ready`, zero or more `pcm`, optional one `error`, and
+  exactly one `stopped`. The worker owns orphan cleanup after supervisor socket EOF. At the
+  merge gate, synchronized early-entry cancellation finished in 317 ms, connected
+  unresponsive cancellation in 649 ms, and supervisor SIGKILL orphan cleanup in 85 ms;
+  every case left zero workers, jobs, sockets, or private directories.
 
 ## Prep commit
 
