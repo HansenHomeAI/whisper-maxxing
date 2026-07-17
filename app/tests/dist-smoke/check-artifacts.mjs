@@ -4,8 +4,10 @@ import { constants } from "node:fs";
 import { createReadStream } from "node:fs";
 import {
   access,
+  lstat,
   mkdtemp,
   readFile,
+  readlink,
   readdir,
   rm,
   stat,
@@ -87,9 +89,19 @@ async function verifyDistributables({ artifacts, binary, nativeCaptureResult }) 
       assertFreshNonemptyArtifact(dmg, binary),
       assertFreshNonemptyArtifact(zip, binary),
     ]);
+    const unpackedApp = path.dirname(path.dirname(path.dirname(binary)));
+    const expectedManifest = await createPayloadManifest(unpackedApp, true);
     return [
-      await verifyMacDmg(dmg, nativeCaptureResult.digest),
-      await verifyMacZip(zip, nativeCaptureResult.digest),
+      await verifyMacDmg(
+        dmg,
+        nativeCaptureResult.digest,
+        expectedManifest,
+      ),
+      await verifyMacZip(
+        zip,
+        nativeCaptureResult.digest,
+        expectedManifest,
+      ),
     ];
   }
 
@@ -105,7 +117,7 @@ async function verifyDistributables({ artifacts, binary, nativeCaptureResult }) 
   throw new Error(`Unsupported artifact smoke platform: ${process.platform}`);
 }
 
-async function verifyMacDmg(dmg, expectedHelperDigest) {
+async function verifyMacDmg(dmg, expectedHelperDigest, expectedManifest) {
   execFileSync("/usr/bin/hdiutil", ["verify", dmg], {
     stdio: ["ignore", "ignore", "pipe"],
     timeout: 120_000,
@@ -122,7 +134,12 @@ async function verifyMacDmg(dmg, expectedHelperDigest) {
     );
     mounted = true;
     const appBundle = await requireSingleRootApp(mountPoint);
-    await verifyMacAppBundle(appBundle, expectedHelperDigest);
+    await verifyMacAppBundle(
+      appBundle,
+      expectedHelperDigest,
+      expectedManifest,
+      "DMG",
+    );
   } catch (error) {
     verificationError = error;
   }
@@ -149,10 +166,10 @@ async function verifyMacDmg(dmg, expectedHelperDigest) {
   if (detachError !== null) {
     throw detachError;
   }
-  return `DMG artifact smoke passed: ${path.basename(dmg)} helper --version => 1`;
+  return `DMG complete payload manifest and helper launch passed: ${path.basename(dmg)} --version => 1`;
 }
 
-async function verifyMacZip(zip, expectedHelperDigest) {
+async function verifyMacZip(zip, expectedHelperDigest, expectedManifest) {
   execFileSync("/usr/bin/unzip", ["-tqq", zip], {
     stdio: ["ignore", "ignore", "pipe"],
     timeout: 120_000,
@@ -164,14 +181,26 @@ async function verifyMacZip(zip, expectedHelperDigest) {
       timeout: 120_000,
     });
     const appBundle = await requireSingleRootApp(temporary);
-    await verifyMacAppBundle(appBundle, expectedHelperDigest);
+    await verifyMacAppBundle(
+      appBundle,
+      expectedHelperDigest,
+      expectedManifest,
+      "ZIP",
+    );
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
-  return `ZIP artifact smoke passed: ${path.basename(zip)} helper --version => 1`;
+  return `ZIP complete payload manifest and helper launch passed: ${path.basename(zip)} --version => 1`;
 }
 
-async function verifyMacAppBundle(appBundle, expectedHelperDigest) {
+async function verifyMacAppBundle(
+  appBundle,
+  expectedHelperDigest,
+  expectedManifest,
+  artifactKind,
+) {
+  const actualManifest = await createPayloadManifest(appBundle, true);
+  assertManifestsEqual(expectedManifest, actualManifest, artifactKind);
   const resources = path.join(appBundle, "Contents", "Resources");
   await access(path.join(resources, "bin", "wdctl.mjs"));
   const helper = path.join(resources, "bin", "whisper-mac-capture");
@@ -217,6 +246,10 @@ async function verifyMacHelper(helper) {
 async function verifyWindowsInstaller(installer, unpackedBinary) {
   const sevenZip = await findSevenZip();
   testArchive(sevenZip, installer);
+  const expectedManifest = await createPayloadManifest(
+    path.dirname(unpackedBinary),
+    false,
+  );
   const temporary = await mkdtemp(path.join(os.tmpdir(), "whisper-nsis-smoke-"));
   try {
     extractArchive(sevenZip, installer, temporary);
@@ -233,15 +266,11 @@ async function verifyWindowsInstaller(installer, unpackedBinary) {
       "resources",
     );
     await access(path.join(extractedResources, "bin", "wdctl.mjs"));
-    const [unpackedDigest, extractedDigest] = await Promise.all([
-      sha256(unpackedBinary),
-      sha256(extractedBinary),
-    ]);
-    if (unpackedDigest !== extractedDigest) {
-      throw new Error(
-        "NSIS application binary differs from the freshly unpacked application binary.",
-      );
-    }
+    const actualManifest = await createPayloadManifest(
+      path.dirname(extractedBinary),
+      false,
+    );
+    assertManifestsEqual(expectedManifest, actualManifest, "NSIS");
     const version = launchVersion(extractedBinary);
     if (!version.includes(packageJson.version)) {
       throw new Error(
@@ -251,7 +280,7 @@ async function verifyWindowsInstaller(installer, unpackedBinary) {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
-  return `NSIS artifact smoke passed: ${path.basename(installer)} contains no Swift/helper artifacts`;
+  return `NSIS complete payload manifest passed: ${path.basename(installer)} contains no Swift/helper artifacts`;
 }
 
 async function requireSingleRootApp(root) {
@@ -445,6 +474,65 @@ function sha256(file) {
     stream.on("data", (chunk) => hash.update(chunk));
     stream.on("end", () => resolve(hash.digest("hex")));
   });
+}
+
+async function createPayloadManifest(root, includeExecutableMode) {
+  const entries = [];
+  const pending = [root];
+  while (pending.length !== 0) {
+    const directory = pending.pop();
+    const children = await readdir(directory);
+    children.sort((left, right) => left.localeCompare(right));
+    for (const name of children) {
+      const entryPath = path.join(directory, name);
+      const relativePath = path.relative(root, entryPath).split(path.sep).join("/");
+      const entryStat = await lstat(entryPath);
+      if (entryStat.isSymbolicLink()) {
+        entries.push({
+          path: relativePath,
+          target: await readlink(entryPath),
+          type: "symlink",
+        });
+        continue;
+      }
+      if (entryStat.isDirectory()) {
+        entries.push({ path: relativePath, type: "directory" });
+        pending.push(entryPath);
+        continue;
+      }
+      if (entryStat.isFile()) {
+        const entry = {
+          path: relativePath,
+          sha256: await sha256(entryPath),
+          type: "file",
+        };
+        if (includeExecutableMode) {
+          entry.executableMode = (entryStat.mode & 0o111)
+            .toString(8)
+            .padStart(3, "0");
+        }
+        entries.push(entry);
+        continue;
+      }
+      throw new Error(
+        `Payload contains unsupported filesystem entry: ${entryPath}`,
+      );
+    }
+  }
+  return entries.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function assertManifestsEqual(expected, actual, artifactKind) {
+  const maximum = Math.max(expected.length, actual.length);
+  for (let index = 0; index < maximum; index += 1) {
+    const expectedEntry = expected[index];
+    const actualEntry = actual[index];
+    if (JSON.stringify(expectedEntry) !== JSON.stringify(actualEntry)) {
+      throw new Error(
+        `${artifactKind} payload manifest differs from unpacked application at index ${index}: expected ${JSON.stringify(expectedEntry)}, received ${JSON.stringify(actualEntry)}`,
+      );
+    }
+  }
 }
 
 async function findForbiddenWindowsNativeArtifacts(root) {
