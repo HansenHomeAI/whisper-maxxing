@@ -22,7 +22,13 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
+      - name: Select Swift 6 toolchain
+        if: runner.os == 'macOS'
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
       - run: npm ci
+      - name: Build native macOS capture helper
+        if: runner.os == 'macOS'
+        run: npm run build:native-capture
       - run: npm run typecheck
       - run: npm run test:unit
       - run: npm run test:pipeline
@@ -71,6 +77,9 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: app/package-lock.json
+      - name: Select Swift 6 toolchain
+        if: runner.os == 'macOS'
+        run: sudo xcode-select -s /Applications/Xcode_16.2.app/Contents/Developer
       - run: npm ci
       - run: npm run dist
       - run: node tests/dist-smoke/check-artifacts.mjs

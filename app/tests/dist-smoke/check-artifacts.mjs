@@ -1,5 +1,17 @@
 import { execFileSync } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { constants } from "node:fs";
+import { createReadStream } from "node:fs";
+import {
+  access,
+  lstat,
+  mkdtemp,
+  readFile,
+  readlink,
+  readdir,
+  rm,
+  stat,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -12,15 +24,10 @@ const packageJson = JSON.parse(
 );
 
 const artifacts = await listReleaseEntries(releaseRoot);
-const expectedArchive = process.platform === "darwin" ? ".dmg" : ".exe";
-const expectedSecondArchive = process.platform === "darwin" ? ".zip" : null;
-requireMatchingArtifact(artifacts, expectedArchive);
-if (expectedSecondArchive !== null) {
-  requireMatchingArtifact(artifacts, expectedSecondArchive);
-}
-
 const binary = packagedBinary(releaseRoot);
-await access(path.join(packagedResources(releaseRoot), "bin", "wdctl.mjs"));
+const resources = packagedResources(releaseRoot);
+await access(path.join(resources, "bin", "wdctl.mjs"));
+const nativeCaptureResult = await verifyUnpackedNativeCapture(resources);
 const output = execFileSync(binary, ["--version"], {
   encoding: "utf8",
   stdio: ["ignore", "pipe", "pipe"],
@@ -31,9 +38,530 @@ if (!output.includes(packageJson.version)) {
     `Packaged binary version mismatch: expected ${packageJson.version}, received ${JSON.stringify(output)}`,
   );
 }
+const distributableResults = await verifyDistributables({
+  artifacts,
+  binary,
+  nativeCaptureResult,
+});
 
 await verifyCompiledSetup();
 console.log(`Artifact smoke passed: ${path.relative(appRoot, binary)} --version => ${output}`);
+console.log(nativeCaptureResult.message);
+for (const result of distributableResults) {
+  console.log(result);
+}
+
+async function verifyUnpackedNativeCapture(resources) {
+  if (process.platform === "darwin") {
+    const helper = path.join(resources, "bin", "whisper-mac-capture");
+    const digest = await verifyMacHelper(helper);
+    return {
+      digest,
+      message: `Native helper launch passed: ${path.relative(appRoot, helper)} --version => 1`,
+    };
+  }
+
+  if (process.platform === "win32") {
+    const unpackedRoot = path.dirname(resources);
+    const forbidden = await findForbiddenWindowsNativeArtifacts(unpackedRoot);
+    if (forbidden.length !== 0) {
+      throw new Error(
+        `Windows package contains macOS native capture artifacts: ${forbidden.join(", ")}`,
+      );
+    }
+    return { message: "Windows unpacked native helper exclusion passed" };
+  }
+
+  throw new Error(`Unsupported artifact smoke platform: ${process.platform}`);
+}
+
+async function verifyDistributables({ artifacts, binary, nativeCaptureResult }) {
+  if (process.platform === "darwin") {
+    const dmg = requireSingleArtifact(
+      artifacts,
+      `-${packageJson.version}-mac-${process.arch}.dmg`,
+    );
+    const zip = requireSingleArtifact(
+      artifacts,
+      `-${packageJson.version}-mac-${process.arch}.zip`,
+    );
+    await Promise.all([
+      assertFreshNonemptyArtifact(dmg, binary),
+      assertFreshNonemptyArtifact(zip, binary),
+    ]);
+    const unpackedApp = path.dirname(path.dirname(path.dirname(binary)));
+    const expectedManifest = await createPayloadManifest(unpackedApp, true);
+    return [
+      await verifyMacDmg(
+        dmg,
+        nativeCaptureResult.digest,
+        expectedManifest,
+      ),
+      await verifyMacZip(
+        zip,
+        nativeCaptureResult.digest,
+        expectedManifest,
+      ),
+    ];
+  }
+
+  if (process.platform === "win32") {
+    const installer = requireSingleArtifact(
+      artifacts,
+      `-${packageJson.version}-win-${process.arch}.exe`,
+    );
+    await assertFreshNonemptyArtifact(installer, binary);
+    return [await verifyWindowsInstaller(installer, binary)];
+  }
+
+  throw new Error(`Unsupported artifact smoke platform: ${process.platform}`);
+}
+
+async function verifyMacDmg(dmg, expectedHelperDigest, expectedManifest) {
+  execFileSync("/usr/bin/hdiutil", ["verify", dmg], {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeout: 120_000,
+  });
+  const mountPoint = await mkdtemp(path.join(os.tmpdir(), "whisper-dmg-smoke-"));
+  let mounted = false;
+  let verificationError = null;
+  let detachError = null;
+  try {
+    execFileSync(
+      "/usr/bin/hdiutil",
+      ["attach", "-readonly", "-nobrowse", "-mountpoint", mountPoint, dmg],
+      { stdio: ["ignore", "ignore", "pipe"], timeout: 120_000 },
+    );
+    mounted = true;
+    const appBundle = await requireSingleRootApp(mountPoint);
+    await verifyMacAppBundle(
+      appBundle,
+      expectedHelperDigest,
+      expectedManifest,
+      "DMG",
+    );
+  } catch (error) {
+    verificationError = error;
+  }
+  if (mounted) {
+    try {
+      execFileSync("/usr/bin/hdiutil", ["detach", "-force", mountPoint], {
+        stdio: ["ignore", "ignore", "pipe"],
+        timeout: 120_000,
+      });
+    } catch (error) {
+      detachError = error;
+    }
+  }
+  await rm(mountPoint, { recursive: true, force: true });
+  if (verificationError !== null && detachError !== null) {
+    throw new AggregateError(
+      [verificationError, detachError],
+      `DMG verification and detach both failed: ${dmg}`,
+    );
+  }
+  if (verificationError !== null) {
+    throw verificationError;
+  }
+  if (detachError !== null) {
+    throw detachError;
+  }
+  return `DMG complete payload manifest and helper launch passed: ${path.basename(dmg)} --version => 1`;
+}
+
+async function verifyMacZip(zip, expectedHelperDigest, expectedManifest) {
+  execFileSync("/usr/bin/unzip", ["-tqq", zip], {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeout: 120_000,
+  });
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "whisper-zip-smoke-"));
+  try {
+    execFileSync("/usr/bin/ditto", ["-x", "-k", zip, temporary], {
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 120_000,
+    });
+    const appBundle = await requireSingleRootApp(temporary);
+    await verifyMacAppBundle(
+      appBundle,
+      expectedHelperDigest,
+      expectedManifest,
+      "ZIP",
+    );
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+  return `ZIP complete payload manifest and helper launch passed: ${path.basename(zip)} --version => 1`;
+}
+
+async function verifyMacAppBundle(
+  appBundle,
+  expectedHelperDigest,
+  expectedManifest,
+  artifactKind,
+) {
+  const actualManifest = await createPayloadManifest(appBundle, true);
+  assertManifestsEqual(expectedManifest, actualManifest, artifactKind);
+  const resources = path.join(appBundle, "Contents", "Resources");
+  await access(path.join(resources, "bin", "wdctl.mjs"));
+  const helper = path.join(resources, "bin", "whisper-mac-capture");
+  const digest = await verifyMacHelper(helper);
+  if (digest !== expectedHelperDigest) {
+    throw new Error(
+      `Distributable helper differs from unpacked helper: ${helper}`,
+    );
+  }
+  const application = path.join(
+    appBundle,
+    "Contents",
+    "MacOS",
+    "Whisper Maxxing",
+  );
+  const version = launchVersion(application);
+  if (!version.includes(packageJson.version)) {
+    throw new Error(
+      `Distributable application version mismatch: expected ${packageJson.version}, received ${JSON.stringify(version)}`,
+    );
+  }
+}
+
+async function verifyMacHelper(helper) {
+  const helperStat = await stat(helper);
+  if (!helperStat.isFile()) {
+    throw new Error(`Bundled native capture helper is not a file: ${helper}`);
+  }
+  await access(helper, constants.X_OK);
+  execFileSync("codesign", ["--verify", "--strict", "--verbose=2", helper], {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeout: 30_000,
+  });
+  const version = launchVersion(helper);
+  if (version !== "1") {
+    throw new Error(
+      `Bundled native capture protocol mismatch: expected 1, received ${JSON.stringify(version)}`,
+    );
+  }
+  return sha256(helper);
+}
+
+async function verifyWindowsInstaller(installer, unpackedBinary) {
+  const sevenZip = await findSevenZip();
+  testArchive(sevenZip, installer);
+  const expectedManifest = await createPayloadManifest(
+    path.dirname(unpackedBinary),
+    false,
+  );
+  const temporary = await mkdtemp(path.join(os.tmpdir(), "whisper-nsis-smoke-"));
+  try {
+    extractArchive(sevenZip, installer, temporary);
+    await extractNestedWindowsArchives(sevenZip, temporary);
+    const forbidden = await findForbiddenWindowsNativeArtifacts(temporary);
+    if (forbidden.length !== 0) {
+      throw new Error(
+        `NSIS installer contains macOS native capture artifacts: ${forbidden.join(", ")}`,
+      );
+    }
+    const extractedBinary = await requireExtractedWindowsApplication(temporary);
+    const extractedResources = path.join(
+      path.dirname(extractedBinary),
+      "resources",
+    );
+    await access(path.join(extractedResources, "bin", "wdctl.mjs"));
+    const actualManifest = await createPayloadManifest(
+      path.dirname(extractedBinary),
+      false,
+    );
+    assertManifestsEqual(expectedManifest, actualManifest, "NSIS");
+    const version = launchVersion(extractedBinary);
+    if (!version.includes(packageJson.version)) {
+      throw new Error(
+        `NSIS application version mismatch: expected ${packageJson.version}, received ${JSON.stringify(version)}`,
+      );
+    }
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+  return `NSIS complete payload manifest passed: ${path.basename(installer)} contains no Swift/helper artifacts`;
+}
+
+async function requireSingleRootApp(root) {
+  const matches = (await readdir(root, { withFileTypes: true }))
+    .filter((entry) => entry.isDirectory() && entry.name.endsWith(".app"))
+    .map((entry) => path.join(root, entry.name));
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected exactly one root application bundle under ${root}, found ${matches.length}`,
+    );
+  }
+  return matches[0];
+}
+
+function requireSingleArtifact(entries, suffix) {
+  const matches = entries.filter((entry) => entry.endsWith(suffix));
+  if (matches.length !== 1) {
+    throw new Error(
+      `Expected exactly one artifact ending in ${suffix} under ${releaseRoot}, found ${matches.length}`,
+    );
+  }
+  return path.join(releaseRoot, matches[0]);
+}
+
+async function assertFreshNonemptyArtifact(artifact, referenceFile) {
+  const [artifactStat, referenceStat] = await Promise.all([
+    stat(artifact),
+    stat(referenceFile),
+  ]);
+  if (!artifactStat.isFile() || artifactStat.size < 1_024) {
+    throw new Error(`Distributable is empty or not a regular file: ${artifact}`);
+  }
+  if (artifactStat.mtimeMs + 1_000 < referenceStat.mtimeMs) {
+    throw new Error(
+      `Distributable predates the unpacked application and may be stale: ${artifact}`,
+    );
+  }
+  const ageMilliseconds = Date.now() - artifactStat.mtimeMs;
+  if (ageMilliseconds > 30 * 60 * 1_000 || ageMilliseconds < -60_000) {
+    throw new Error(
+      `Distributable timestamp is stale or invalid (${Math.round(ageMilliseconds / 1_000)} seconds): ${artifact}`,
+    );
+  }
+}
+
+async function findSevenZip() {
+  const roots = [
+    process.env.ProgramW6432,
+    process.env.ProgramFiles,
+    process.env["ProgramFiles(x86)"],
+  ].filter((value) => typeof value === "string" && value.length !== 0);
+  const candidates = [
+    ...roots.map((root) => path.join(root, "7-Zip", "7z.exe")),
+    "C:\\ProgramData\\chocolatey\\bin\\7z.exe",
+  ];
+  for (const candidate of candidates) {
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  let discovered = [];
+  try {
+    discovered = execFileSync("where.exe", ["7z.exe"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 30_000,
+    })
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.length !== 0);
+  } catch {
+    discovered = [];
+  }
+  for (const candidate of discovered) {
+    if (await pathExists(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error(
+    "Windows distributable smoke requires the preinstalled 7-Zip extractor, but 7z.exe was not found.",
+  );
+}
+
+function testArchive(sevenZip, archive) {
+  execFileSync(sevenZip, ["t", "-bd", "-y", archive], {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeout: 120_000,
+  });
+}
+
+function extractArchive(sevenZip, archive, destination) {
+  execFileSync(sevenZip, ["x", "-bd", "-y", `-o${destination}`, archive], {
+    stdio: ["ignore", "ignore", "pipe"],
+    timeout: 120_000,
+  });
+}
+
+async function extractNestedWindowsArchives(sevenZip, root) {
+  const processed = new Set();
+  let extractionCount = 0;
+  while (true) {
+    const archives = (await findPaths(root, (entry) => {
+      const lowerName = entry.name.toLowerCase();
+      return (
+        entry.isFile() &&
+        (lowerName.endsWith(".7z") || lowerName.endsWith(".zip"))
+      );
+    })).filter((archive) => !processed.has(archive));
+    if (archives.length === 0) {
+      return;
+    }
+    for (const archive of archives) {
+      processed.add(archive);
+      extractionCount += 1;
+      if (extractionCount > 20) {
+        throw new Error("NSIS installer contains too many nested archives to inspect safely.");
+      }
+      testArchive(sevenZip, archive);
+      const destination = path.join(root, `nested-${extractionCount}`);
+      extractArchive(sevenZip, archive, destination);
+    }
+  }
+}
+
+async function requireExtractedWindowsApplication(root) {
+  const candidates = await findPaths(
+    root,
+    (entry) => entry.isFile() && entry.name.toLowerCase() === "whisper maxxing.exe",
+  );
+  const applications = [];
+  for (const candidate of candidates) {
+    if (
+      await pathExists(
+        path.join(path.dirname(candidate), "resources", "app.asar"),
+      )
+    ) {
+      applications.push(candidate);
+    }
+  }
+  if (applications.length !== 1) {
+    throw new Error(
+      `Expected exactly one complete application in the NSIS payload, found ${applications.length}`,
+    );
+  }
+  return applications[0];
+}
+
+async function findPaths(root, predicate) {
+  const matches = [];
+  const pending = [root];
+  while (pending.length !== 0) {
+    const directory = pending.pop();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (predicate(entry)) {
+        matches.push(entryPath);
+      }
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      }
+    }
+  }
+  return matches.sort();
+}
+
+async function pathExists(target) {
+  try {
+    await access(target);
+    return true;
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function launchVersion(executable) {
+  return execFileSync(executable, ["--version"], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+    timeout: 30_000,
+  }).trim();
+}
+
+function sha256(file) {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = createReadStream(file);
+    stream.on("error", reject);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+async function createPayloadManifest(root, includeExecutableMode) {
+  const entries = [];
+  const pending = [root];
+  while (pending.length !== 0) {
+    const directory = pending.pop();
+    const children = await readdir(directory);
+    children.sort((left, right) => left.localeCompare(right));
+    for (const name of children) {
+      const entryPath = path.join(directory, name);
+      const relativePath = path.relative(root, entryPath).split(path.sep).join("/");
+      const entryStat = await lstat(entryPath);
+      if (entryStat.isSymbolicLink()) {
+        entries.push({
+          path: relativePath,
+          target: await readlink(entryPath),
+          type: "symlink",
+        });
+        continue;
+      }
+      if (entryStat.isDirectory()) {
+        entries.push({ path: relativePath, type: "directory" });
+        pending.push(entryPath);
+        continue;
+      }
+      if (entryStat.isFile()) {
+        const entry = {
+          path: relativePath,
+          sha256: await sha256(entryPath),
+          type: "file",
+        };
+        if (includeExecutableMode) {
+          entry.executableMode = (entryStat.mode & 0o111)
+            .toString(8)
+            .padStart(3, "0");
+        }
+        entries.push(entry);
+        continue;
+      }
+      throw new Error(
+        `Payload contains unsupported filesystem entry: ${entryPath}`,
+      );
+    }
+  }
+  return entries.sort((left, right) => left.path.localeCompare(right.path));
+}
+
+function assertManifestsEqual(expected, actual, artifactKind) {
+  const maximum = Math.max(expected.length, actual.length);
+  for (let index = 0; index < maximum; index += 1) {
+    const expectedEntry = expected[index];
+    const actualEntry = actual[index];
+    if (JSON.stringify(expectedEntry) !== JSON.stringify(actualEntry)) {
+      throw new Error(
+        `${artifactKind} payload manifest differs from unpacked application at index ${index}: expected ${JSON.stringify(expectedEntry)}, received ${JSON.stringify(actualEntry)}`,
+      );
+    }
+  }
+}
+
+async function findForbiddenWindowsNativeArtifacts(root) {
+  const forbidden = [];
+  const pending = [root];
+  while (pending.length !== 0) {
+    const directory = pending.pop();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      const relative = path.relative(root, entryPath);
+      const lowerName = entry.name.toLowerCase();
+      if (
+        lowerName.includes("whisper-mac-capture") ||
+        lowerName.includes("whispermaccapture") ||
+        lowerName === "macos-capture" ||
+        lowerName === ".build" ||
+        lowerName === "package.swift" ||
+        lowerName === "package.resolved" ||
+        lowerName.endsWith(".swift")
+      ) {
+        forbidden.push(relative);
+      }
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      }
+    }
+  }
+  return forbidden.sort();
+}
 
 async function verifyCompiledSetup() {
   const { ensureFirstRunConfig, MAC_ACCESSIBILITY_SETTINGS_URL, MAC_MICROPHONE_SETTINGS_URL } =
@@ -127,12 +655,6 @@ async function verifyCompiledSetup() {
 async function listReleaseEntries(root) {
   const { readdir } = await import("node:fs/promises");
   return readdir(root);
-}
-
-function requireMatchingArtifact(entries, extension) {
-  if (!entries.some((entry) => entry.toLowerCase().endsWith(extension))) {
-    throw new Error(`Missing ${extension} artifact under ${releaseRoot}`);
-  }
 }
 
 function packagedBinary(root) {
