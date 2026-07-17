@@ -83,6 +83,14 @@ at `process.resourcesPath/bin/whisper-mac-capture`. Windows never compiles or pa
   `AudioDeviceStart`, with conversion and the wire protocol unchanged. It is mergeable only
   if the same run proves zero large components and real nonzero PCM; otherwise the objective
   remains unmet rather than being waived.
+- D42: The persistent large pill follows macOS process responsibility. The unchanged
+  historical native Swift daemon produces the pill when shell-launched, but as a GUI-domain
+  launchd job it reports a real 1,000 ms prebuffer with only the 10×10 privacy dot. The
+  helper is therefore split into a direct Electron-child protocol supervisor and a
+  same-binary launchd capture worker connected by a private AF_UNIX socket. Only the worker
+  opens the device. The supervisor remains the direct `whisper-mac-capture` child expected by
+  runtime cleanup; both the worker process and submitted job are removed on graceful stop,
+  supervisor death, and application quit.
 
 ## Prep commit
 

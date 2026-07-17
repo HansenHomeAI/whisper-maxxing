@@ -58,3 +58,15 @@ the lower Core Audio device IOProc API (`AudioDeviceCreateIOProcID`/`AudioDevice
 prove the unchanged zero-large-component plus real-PCM gate. This amendment supersedes A2's
 mandated client format, but not its prohibition on AVAudioEngine/Electron fallback or any
 acceptance criterion.
+
+### A4 — Separate the protocol supervisor from the launchd capture worker
+
+Direct shell/child capture reproduces the large pill even with the unchanged historical
+native Swift daemon, while the same daemon launched as a GUI-domain launchd job produces
+real PCM and only the small privacy dot. The Electron child must therefore remain a bounded
+protocol supervisor named `whisper-mac-capture`, while a launchd-owned same-binary worker is
+the only process that opens the microphone. They communicate over a private local socket.
+TERM must yield a valid stopped frame; supervisor SIGKILL/socket EOF must make the worker
+stop and remove its submitted launchd job; application quit must leave neither process nor
+job. This is local process isolation only: no network listener, telemetry, retained audio,
+renderer fallback, permission change, or visual-test relaxation is allowed.
