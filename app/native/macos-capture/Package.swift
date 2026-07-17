@@ -62,7 +62,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "WhisperMacCapture",
-            dependencies: ["WhisperMacCaptureCore"]
+            dependencies: ["WhisperMacCaptureCore"],
+            swiftSettings: [
+                .define(
+                    "WMC_RUNTIME_TEST_HOOKS",
+                    .when(configuration: .debug)
+                ),
+            ]
         ),
         .executableTarget(
             name: "WhisperMacCaptureTestRunner",

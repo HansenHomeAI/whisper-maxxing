@@ -5,7 +5,7 @@ import XCTest
 final class SharedInventoryXCTests: XCTestCase {
     func testPinnedNativeHelperInventory() throws {
         let result = try SelfTest.run(includeFilesystemSocketTest: false)
-        XCTAssertEqual(result.suites.count, 23)
+        XCTAssertEqual(result.suites.count, 27)
         XCTAssertEqual(result.suites.map(\.name), [
             "CaptureProtocol.readyFrame",
             "CaptureProtocol.pcmIsLittleEndian",
@@ -27,6 +27,10 @@ final class SharedInventoryXCTests: XCTestCase {
             "WorkerProtocol.forwardsCompleteFrames",
             "WorkerProtocol.rejectsPartialEOF",
             "WorkerProtocol.rejectsTerminalTrailingBytes",
+            "SupervisorCancellation.beforeSubmit",
+            "SupervisorCancellation.afterSubmitBeforeConnect",
+            "SupervisorCancellation.connectedUnresponsive",
+            "LaunchdCleanup.surfacesFailures",
             "LaunchdWorker.rejectsInvalidIdentity",
             "AudioBacklogBudget.boundsTwoSeconds",
             "AudioBacklogBudget.surfacesOverload",

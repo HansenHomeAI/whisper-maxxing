@@ -115,6 +115,18 @@ public enum SelfTest {
         try runSuite("WorkerProtocol.rejectsTerminalTrailingBytes") {
             try verifyTerminalTrailingBytes(assertions: assertions)
         }
+        try runSuite("SupervisorCancellation.beforeSubmit") {
+            try verifyCancellationBeforeSubmit(assertions: assertions)
+        }
+        try runSuite("SupervisorCancellation.afterSubmitBeforeConnect") {
+            try verifyCancellationAfterSubmit(assertions: assertions)
+        }
+        try runSuite("SupervisorCancellation.connectedUnresponsive") {
+            try verifyConnectedCancellation(assertions: assertions)
+        }
+        try runSuite("LaunchdCleanup.surfacesFailures") {
+            try verifyCleanupFailures(assertions: assertions)
+        }
         try runSuite("LaunchdWorker.rejectsInvalidIdentity") {
             try verifyWorkerIdentity(assertions: assertions)
         }
@@ -125,7 +137,7 @@ public enum SelfTest {
             try verifyAudioBacklogOverload(assertions: assertions)
         }
 
-        let expectedSuiteCount = onlySuiteNamed == nil ? 23 : 1
+        let expectedSuiteCount = onlySuiteNamed == nil ? 27 : 1
         guard suites.count == expectedSuiteCount else {
             throw SelfTestFailure(
                 "test inventory mismatch: expected \(expectedSuiteCount), executed \(suites.count)"
@@ -684,6 +696,114 @@ public enum SelfTest {
         }
     }
 
+    private static func verifyCancellationBeforeSubmit(
+        assertions: SelfTestAssertions
+    ) throws {
+        let lifecycle = CaptureSupervisorLifecycle()
+        let requested = lifecycle.requestStop()
+        try assertions.expect(
+            requested.phase == .beforeSubmit && requested.stopRequested,
+            "before-submit cancellation is recorded atomically"
+        )
+        try assertions.expect(
+            lifecycle.transition(to: .submitting),
+            "submission observes an existing cancellation"
+        )
+        try assertions.expect(
+            lifecycle.claimTerminal() && !lifecycle.claimTerminal(),
+            "before-submit cancellation claims exactly one terminal"
+        )
+    }
+
+    private static func verifyCancellationAfterSubmit(
+        assertions: SelfTestAssertions
+    ) throws {
+        let lifecycle = CaptureSupervisorLifecycle()
+        _ = lifecycle.transition(to: .submitting)
+        _ = lifecycle.transition(to: .awaitingWorkerPID)
+        let requested = lifecycle.requestStop()
+        try assertions.expect(
+            requested.phase == .awaitingWorkerPID,
+            "post-submit cancellation preserves the cleanup phase"
+        )
+        try assertions.expect(
+            lifecycle.transition(to: .awaitingConnection),
+            "PID and connection polling observe cancellation"
+        )
+        try assertions.expect(
+            lifecycle.claimTerminal() && lifecycle.snapshot().terminalClaimed,
+            "post-submit cancellation owns one terminal"
+        )
+    }
+
+    private static func verifyConnectedCancellation(
+        assertions: SelfTestAssertions
+    ) throws {
+        let lifecycle = CaptureSupervisorLifecycle()
+        _ = lifecycle.transition(to: .connected)
+        let requested = lifecycle.requestStop()
+        try assertions.expect(
+            requested.phase == .connected && requested.stopRequested,
+            "connected cancellation is visible to forced cleanup"
+        )
+        try assertions.expect(
+            CaptureSupervisorLifecycle.forcedCleanupDelayMilliseconds < 1_000,
+            "connected forced cleanup precedes adapter SIGKILL grace"
+        )
+        try assertions.expect(
+            lifecycle.claimTerminal() && !lifecycle.claimTerminal(),
+            "unresponsive worker cancellation claims exactly one terminal"
+        )
+    }
+
+    private static func verifyCleanupFailures(
+        assertions: SelfTestAssertions
+    ) throws {
+        let state = SelfTestLaunchdRemovalState(isLoaded: true)
+        do {
+            try ensureLaunchdJobRemoved(
+                label: "com.whispermaxxing.capture.42.012345abcdef",
+                verificationAttempts: 2,
+                operations: state.operations
+            )
+            throw SelfTestFailure("loaded launchd job removal unexpectedly succeeded")
+        } catch let error as LaunchdCleanupError {
+            try assertions.expect(
+                error == .removalFailed(
+                    label: "com.whispermaxxing.capture.42.012345abcdef",
+                    status: 5
+                ),
+                "failed removal remains visible when the job is loaded"
+            )
+        }
+        try assertions.expect(
+            state.snapshot() == (removeCount: 1, loadedChecks: 2),
+            "failed removal is verified before reporting failure"
+        )
+
+        let alreadyAbsent = SelfTestLaunchdRemovalState(isLoaded: false)
+        try ensureLaunchdJobRemoved(
+            label: "com.whispermaxxing.capture.43.012345abcdef",
+            operations: alreadyAbsent.operations
+        )
+        try assertions.expect(
+            alreadyAbsent.snapshot().loadedChecks == 1,
+            "an already-absent job is verified as clean"
+        )
+
+        do {
+            try removeCapturePrivateDirectory(path: "/tmp/wmc-test") { _ in
+                throw SelfTestFailure("permission denied")
+            }
+            throw SelfTestFailure("private-directory removal unexpectedly succeeded")
+        } catch let error as LaunchdCleanupError {
+            try assertions.expect(
+                error.localizedDescription.contains("permission denied"),
+                "private-directory cleanup failure is visible"
+            )
+        }
+    }
+
     private static func verifyWorkerIdentity(
         assertions: SelfTestAssertions
     ) throws {
@@ -1054,5 +1174,41 @@ private final class SelfTestRetryState: @unchecked Sendable {
             attemptedDescriptors: attemptedDescriptors,
             closedDescriptors: closedDescriptors
         )
+    }
+}
+
+private final class SelfTestLaunchdRemovalState: @unchecked Sendable {
+    private let lock = NSLock()
+    private let loaded: Bool
+    private var removeCount = 0
+    private var loadedChecks = 0
+
+    init(isLoaded: Bool) {
+        loaded = isLoaded
+    }
+
+    var operations: LaunchdRemovalOperations {
+        LaunchdRemovalOperations(
+            remove: { [self] _ in
+                lock.lock()
+                removeCount += 1
+                lock.unlock()
+                return 5
+            },
+            isLoaded: { [self] _ in
+                lock.lock()
+                loadedChecks += 1
+                let result = loaded
+                lock.unlock()
+                return result
+            },
+            backoff: {}
+        )
+    }
+
+    func snapshot() -> (removeCount: Int, loadedChecks: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (removeCount, loadedChecks)
     }
 }

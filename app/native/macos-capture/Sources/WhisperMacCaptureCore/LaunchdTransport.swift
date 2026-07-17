@@ -14,6 +14,7 @@ public enum LaunchdTransportError: Error, LocalizedError {
     case unexpectedPeer(pid_t, pid_t)
     case connectTimedOut(Int32)
     case executablePath(Int32)
+    case cancelled
 
     public var errorDescription: String? {
         switch self {
@@ -37,6 +38,8 @@ public enum LaunchdTransportError: Error, LocalizedError {
             return "Unable to connect to the native capture supervisor (errno \(code))."
         case .executablePath(let code):
             return "Unable to resolve the native capture executable (errno \(code))."
+        case .cancelled:
+            return "Native capture startup was cancelled."
         }
     }
 }
@@ -132,7 +135,8 @@ public final class UnixSocketServer: @unchecked Sendable {
 
     public func accept(
         expectedPeerPID: pid_t,
-        timeoutMilliseconds: Int
+        timeoutMilliseconds: Int,
+        cancellationCheck: @escaping @Sendable () -> Bool = { false }
     ) throws -> Int32 {
         precondition(timeoutMilliseconds > 0)
         precondition(expectedPeerPID > 0)
@@ -152,6 +156,9 @@ public final class UnixSocketServer: @unchecked Sendable {
         )
         var unexpectedPeerPID: pid_t?
         while true {
+            guard !cancellationCheck() else {
+                throw LaunchdTransportError.cancelled
+            }
             let now = DispatchTime.now().uptimeNanoseconds
             guard now < deadline else {
                 if let unexpectedPeerPID {
@@ -164,11 +171,14 @@ public final class UnixSocketServer: @unchecked Sendable {
             }
             let remainingMilliseconds = Int32(
                 min(
-                    UInt64(Int32.max),
+                    50,
                     (deadline - now + 999_999) / 1_000_000
                 )
             )
             let result = poll(&pollDescriptor, 1, remainingMilliseconds)
+            guard !cancellationCheck() else {
+                throw LaunchdTransportError.cancelled
+            }
             if result > 0 {
                 let connectedDescriptor = Darwin.accept(
                     listeningDescriptor,
@@ -194,7 +204,7 @@ public final class UnixSocketServer: @unchecked Sendable {
                 }
             }
             if result == 0 {
-                throw LaunchdTransportError.acceptTimedOut
+                continue
             }
             if errno != EINTR {
                 throw LaunchdTransportError.accept(errno)
