@@ -21,14 +21,38 @@ public enum CaptureProtocol {
         public let sampleRateHz: Int
         public let channels: Int
         public let sampleFormat: String
-        public let defaultInputDeviceName: String
+        public let defaultInputDeviceName: String?
 
-        public init(defaultInputDeviceName: String) {
+        private enum CodingKeys: String, CodingKey {
+            case protocolVersion
+            case sampleRateHz
+            case channels
+            case sampleFormat
+            case defaultInputDeviceName
+        }
+
+        public init(defaultInputDeviceName: String?) {
             protocolVersion = CaptureProtocol.version
             sampleRateHz = CaptureProtocol.sampleRateHz
             channels = CaptureProtocol.channels
             sampleFormat = CaptureProtocol.sampleFormat
             self.defaultInputDeviceName = defaultInputDeviceName
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(protocolVersion, forKey: .protocolVersion)
+            try container.encode(sampleRateHz, forKey: .sampleRateHz)
+            try container.encode(channels, forKey: .channels)
+            try container.encode(sampleFormat, forKey: .sampleFormat)
+            if let defaultInputDeviceName {
+                try container.encode(
+                    defaultInputDeviceName,
+                    forKey: .defaultInputDeviceName
+                )
+            } else {
+                try container.encodeNil(forKey: .defaultInputDeviceName)
+            }
         }
     }
 
@@ -54,7 +78,7 @@ public enum CaptureProtocol {
         }
     }
 
-    public static func readyFrame(defaultInputDeviceName: String) throws -> Data {
+    public static func readyFrame(defaultInputDeviceName: String?) throws -> Data {
         try jsonFrame(
             type: .ready,
             value: ReadyPayload(defaultInputDeviceName: defaultInputDeviceName)

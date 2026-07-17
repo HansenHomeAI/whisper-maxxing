@@ -39,7 +39,7 @@ public final class FrameWriter: @unchecked Sendable {
         self.writeFailureHandler = writeFailureHandler
     }
 
-    public func enqueueReady(defaultInputDeviceName: String) -> EnqueueResult {
+    public func enqueueReady(defaultInputDeviceName: String?) -> EnqueueResult {
         do {
             return enqueueControl(
                 try CaptureProtocol.readyFrame(
@@ -88,7 +88,7 @@ public final class FrameWriter: @unchecked Sendable {
 
     public func finishStopped(completion: @escaping @Sendable () -> Void) {
         finish(
-            makeFrame: CaptureProtocol.stoppedFrame,
+            makeFrames: { [try CaptureProtocol.stoppedFrame()] },
             completion: completion
         )
     }
@@ -98,7 +98,12 @@ public final class FrameWriter: @unchecked Sendable {
         completion: @escaping @Sendable () -> Void
     ) {
         finish(
-            makeFrame: { try CaptureProtocol.errorFrame(message: message) },
+            makeFrames: {
+                [
+                    try CaptureProtocol.errorFrame(message: message),
+                    try CaptureProtocol.stoppedFrame(),
+                ]
+            },
             completion: completion
         )
     }
@@ -117,12 +122,12 @@ public final class FrameWriter: @unchecked Sendable {
     }
 
     private func finish(
-        makeFrame: () throws -> Data,
+        makeFrames: () throws -> [Data],
         completion: @escaping @Sendable () -> Void
     ) {
-        let frame: Data
+        let frames: [Data]
         do {
-            frame = try makeFrame()
+            frames = try makeFrames()
         } catch {
             reportWriteFailure(error)
             return
@@ -135,7 +140,7 @@ public final class FrameWriter: @unchecked Sendable {
         }
         state = .finishing
         outputQueue.async { [self] in
-            write(frame)
+            for frame in frames { write(frame) }
             lock.lock()
             state = .finished
             let failed = reportedWriteFailure

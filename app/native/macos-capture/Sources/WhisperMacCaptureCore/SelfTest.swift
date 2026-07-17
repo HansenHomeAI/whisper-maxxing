@@ -435,6 +435,37 @@ public enum SelfTest {
             try collector.snapshot().map { try decode($0).type } == [1, 2, 4],
             "ordered writer frames"
         )
+
+        let failureCollector = SelfTestFrameCollector()
+        let failureFinished = DispatchSemaphore(value: 0)
+        let failureWriter = FrameWriter(
+            sink: failureCollector.append,
+            writeFailureHandler: failures.append
+        )
+        try assertions.expect(
+            failureWriter.enqueueReady(defaultInputDeviceName: nil) == .accepted,
+            "synthetic ready enqueue"
+        )
+        failureWriter.finishError(message: "startup failed") {
+            failureFinished.signal()
+        }
+        try assertions.expect(
+            failureFinished.wait(timeout: .now() + 1) == .success,
+            "failure writer completion"
+        )
+        let failureFrames = try failureCollector.snapshot().map(decode)
+        try assertions.expect(
+            failureFrames.map(\.type) == [1, 3, 4],
+            "failure writer emits ready, error, stopped"
+        )
+        let syntheticReady = try JSONDecoder().decode(
+            CaptureProtocol.ReadyPayload.self,
+            from: failureFrames[0].payload
+        )
+        try assertions.expect(
+            syntheticReady.defaultInputDeviceName == nil,
+            "synthetic ready reports a null input device"
+        )
     }
 
     private static func verifyFrameWriterBound(
@@ -612,6 +643,21 @@ public enum SelfTest {
             terminal.type == .stopped && terminal.frame == stopped,
             "worker terminal is released only after byte-complete EOF"
         )
+
+        let error = try CaptureProtocol.errorFrame(message: "capture failed")
+        var failedStream = WorkerProtocolStreamDecoder()
+        var failedBytes = ready
+        failedBytes.append(error)
+        failedBytes.append(stopped)
+        try assertions.expect(
+            try failedStream.append(failedBytes) == [ready, error],
+            "ready and error are forwarded before stopped"
+        )
+        try assertions.expect(
+            failedStream.errorSeen
+                && (try failedStream.finish()).type == .stopped,
+            "error remains nonterminal and stopped is the sole terminal"
+        )
     }
 
     private static func verifyPartialWorkerEOF(
@@ -654,15 +700,43 @@ public enum SelfTest {
                 "missing worker terminal is rejected"
             )
         }
+
+        var stoppedBeforeReady = WorkerProtocolStreamDecoder()
+        do {
+            _ = try stoppedBeforeReady.append(CaptureProtocol.stoppedFrame())
+            throw SelfTestFailure("stopped-before-ready unexpectedly succeeded")
+        } catch let error as WorkerProtocolStreamError {
+            try assertions.expect(
+                error == .invalidFrame("stopped payload"),
+                "stopped before ready is rejected"
+            )
+        }
+
+        var errorBeforeReady = WorkerProtocolStreamDecoder()
+        do {
+            _ = try errorBeforeReady.append(
+                CaptureProtocol.errorFrame(message: "too early")
+            )
+            throw SelfTestFailure("error-before-ready unexpectedly succeeded")
+        } catch let error as WorkerProtocolStreamError {
+            try assertions.expect(
+                error == .invalidFrame("error payload"),
+                "error before ready is rejected"
+            )
+        }
     }
 
     private static func verifyTerminalTrailingBytes(
         assertions: SelfTestAssertions
     ) throws {
+        let ready = try CaptureProtocol.readyFrame(
+            defaultInputDeviceName: "Trailing Test"
+        )
         let stopped = try CaptureProtocol.stoppedFrame()
         for trailingByteCount in 1...4 {
             var decoder = WorkerProtocolStreamDecoder()
-            var input = stopped
+            var input = ready
+            input.append(stopped)
             input.append(Data(
                 repeating: 0xa5,
                 count: trailingByteCount
@@ -672,26 +746,29 @@ public enum SelfTest {
                 externallyWritten.append(contentsOf: try decoder.append(input))
                 externallyWritten.append(try decoder.finish().frame)
             } catch {
-                externallyWritten.append(try CaptureProtocol.errorFrame(
-                    message: error.localizedDescription
-                ))
+                externallyWritten = [
+                    try CaptureProtocol.readyFrame(defaultInputDeviceName: nil),
+                    try CaptureProtocol.errorFrame(
+                        message: error.localizedDescription
+                    ),
+                    try CaptureProtocol.stoppedFrame(),
+                ]
             }
 
             let decoded = try externallyWritten.map(decode)
             try assertions.expect(
-                externallyWritten.count == 1,
-                "terminal plus \(trailingByteCount) trailing bytes emits one frame"
+                externallyWritten.count == 3,
+                "terminal plus \(trailingByteCount) trailing bytes emits a complete failure"
             )
             try assertions.expect(
-                decoded.map(\.type) == [CaptureProtocol.MessageType.error.rawValue],
-                "terminal plus \(trailingByteCount) trailing bytes emits one error terminal"
+                decoded.map(\.type) == [1, 3, 4],
+                "terminal plus \(trailingByteCount) trailing bytes emits ready, error, stopped"
             )
             try assertions.expect(
                 decoded.filter {
-                    $0.type == CaptureProtocol.MessageType.error.rawValue
-                        || $0.type == CaptureProtocol.MessageType.stopped.rawValue
+                    $0.type == CaptureProtocol.MessageType.stopped.rawValue
                 }.count == 1,
-                "terminal plus \(trailingByteCount) trailing bytes never emits two terminals"
+                "terminal plus \(trailingByteCount) trailing bytes emits one stopped terminal"
             )
         }
     }

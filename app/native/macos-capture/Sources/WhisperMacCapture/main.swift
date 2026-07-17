@@ -3,7 +3,41 @@ import Dispatch
 import Foundation
 import WhisperMacCaptureCore
 
+private var startupSignalSet = sigset_t()
+sigemptyset(&startupSignalSet)
+sigaddset(&startupSignalSet, SIGTERM)
+sigaddset(&startupSignalSet, SIGINT)
+_ = pthread_sigmask(SIG_BLOCK, &startupSignalSet, nil)
+#if WMC_RUNTIME_TEST_HOOKS
+if let markerPath = getenv("WMC_TEST_EARLY_ENTRY_MARKER") {
+    let descriptor = Darwin.open(
+        String(cString: markerPath),
+        O_CREAT | O_EXCL | O_WRONLY,
+        0o600
+    )
+    if descriptor >= 0 { Darwin.close(descriptor) }
+    usleep(100_000)
+}
+#endif
+
 private let launchdWorkerOption = "--launchd-worker"
+
+private func retainSignalForDispatch(_: Int32) {}
+
+private func unblockStartupSignals() {
+    var signalSet = sigset_t()
+    sigemptyset(&signalSet)
+    sigaddset(&signalSet, SIGTERM)
+    sigaddset(&signalSet, SIGINT)
+    _ = pthread_sigmask(SIG_UNBLOCK, &signalSet, nil)
+}
+
+private func startupSignalIsPending() -> Bool {
+    var pendingSet = sigset_t()
+    guard sigpending(&pendingSet) == 0 else { return false }
+    return sigismember(&pendingSet, SIGTERM) == 1
+        || sigismember(&pendingSet, SIGINT) == 1
+}
 
 private enum BoundedCommandError: Error, LocalizedError {
     case timedOut(String)
@@ -131,6 +165,36 @@ private func forceTerminateLaunchdJob(label: String) throws {
     )
 }
 
+private func removePrivateDirectoryIfPresent(path: String) throws {
+    do {
+        try FileManager.default.removeItem(atPath: path)
+    } catch {
+        let cocoaError = error as NSError
+        if cocoaError.domain == NSCocoaErrorDomain,
+           cocoaError.code == NSFileNoSuchFileError {
+            return
+        }
+        throw error
+    }
+}
+
+private func requestOwnLaunchdRemoval(label: String) throws {
+    let status = try runBoundedCommand(
+        executable: "/bin/launchctl",
+        arguments: ["remove", label],
+        timeoutMilliseconds: 100
+    ).status
+    if status == 0 { return }
+    let stillLoaded = try runBoundedCommand(
+        executable: "/bin/launchctl",
+        arguments: ["print", "gui/\(getuid())/\(label)"],
+        timeoutMilliseconds: 75
+    ).status == 0
+    if stillLoaded {
+        throw LaunchdCleanupError.removalFailed(label: label, status: status)
+    }
+}
+
 private final class CaptureApplication: @unchecked Sendable {
     private enum State {
         case idle
@@ -142,6 +206,7 @@ private final class CaptureApplication: @unchecked Sendable {
     private let standardOutput: BoundedOutput
     private let controlFileDescriptor: Int32
     private let cleanupHandler: @Sendable () -> Error?
+    private let orphanHandler: @Sendable () -> Void
     private let lifecycleQueue = DispatchQueue(label: "whisper.mac.capture.lifecycle")
     private let backlogBudget = AudioBacklogBudget()
     private var state = State.idle
@@ -181,11 +246,13 @@ private final class CaptureApplication: @unchecked Sendable {
         options: CommandLineOptions,
         standardOutput: BoundedOutput,
         controlFileDescriptor: Int32,
+        orphanHandler: @escaping @Sendable () -> Void,
         cleanupHandler: @escaping @Sendable () -> Error?
     ) {
         self.options = options
         self.standardOutput = standardOutput
         self.controlFileDescriptor = controlFileDescriptor
+        self.orphanHandler = orphanHandler
         self.cleanupHandler = cleanupHandler
     }
 
@@ -215,11 +282,18 @@ private final class CaptureApplication: @unchecked Sendable {
         }
     }
 
-    private func stop() {
+    private func stop(orphaned: Bool = false) {
+        if orphaned { orphanHandler() }
         guard state != .ending else { return }
+        let needsReady = state == .idle
         state = .ending
         capture.stop()
         outputPipeline.stop()
+        if needsReady,
+           writer.enqueueReady(defaultInputDeviceName: nil)
+            != .accepted {
+            return
+        }
         writer.finishStopped { [self] in
             terminate(EXIT_SUCCESS)
         }
@@ -227,16 +301,23 @@ private final class CaptureApplication: @unchecked Sendable {
 
     private func fail(message: String) {
         guard state != .ending else { return }
+        let needsReady = state == .idle
         state = .ending
         capture.stop()
         outputPipeline.stop()
         fputs("whisper-mac-capture: \(message)\n", stderr)
+        if needsReady,
+           writer.enqueueReady(defaultInputDeviceName: nil)
+            != .accepted {
+            return
+        }
         writer.finishError(message: message) { [self] in
             terminate(EX_SOFTWARE)
         }
     }
 
     private func outputWriteFailed(_ error: Error) {
+        orphanHandler()
         fputs(
             "whisper-mac-capture: worker socket write failed: "
                 + "\(error.localizedDescription)\n",
@@ -273,17 +354,24 @@ private final class CaptureApplication: @unchecked Sendable {
     }
 
     private func installSignalHandlers() {
+        let startupStopPending = startupSignalIsPending()
         for signalNumber in [SIGTERM, SIGINT] {
-            Darwin.signal(signalNumber, SIG_IGN)
+            Darwin.signal(signalNumber, retainSignalForDispatch)
             let source = DispatchSource.makeSignalSource(
                 signal: signalNumber,
                 queue: lifecycleQueue
             )
             source.setEventHandler { [weak self] in
-                self?.stop()
+                self?.stop(orphaned: false)
             }
             source.resume()
             signalSources.append(source)
+        }
+        unblockStartupSignals()
+        if startupStopPending {
+            lifecycleQueue.async { [weak self] in
+                self?.stop(orphaned: false)
+            }
         }
     }
 
@@ -296,10 +384,12 @@ private final class CaptureApplication: @unchecked Sendable {
             guard let self else { return }
             var byte = UInt8(0)
             let count = Darwin.read(controlFileDescriptor, &byte, 1)
-            if count > 0 || count == 0 {
-                stop()
+            if count > 0 {
+                stop(orphaned: false)
+            } else if count == 0 {
+                stop(orphaned: true)
             } else if errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR {
-                stop()
+                stop(orphaned: true)
             }
         }
         source.resume()
@@ -354,6 +444,8 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
     private var forcedStopScheduled = false
     private var controlSignalFailure: Error?
     private var privateDirectoryCreated = false
+    private var readyWritten = false
+    private var errorWritten = false
     private var server: UnixSocketServer?
     private var signalSources: [DispatchSourceSignal] = []
 
@@ -480,9 +572,12 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
             workerArguments.append("--enforce-preferred-input-device")
         }
 #if WMC_RUNTIME_TEST_HOOKS
-        if ProcessInfo.processInfo.environment["WMC_TEST_WORKER_MODE"]
-            == "unresponsive" {
-            workerArguments.append("--runtime-test-unresponsive")
+        if let testWorkerMode = ProcessInfo.processInfo.environment[
+            "WMC_TEST_WORKER_MODE"
+        ], ["unresponsive", "orphan-cleanup", "startup-failure"].contains(
+            testWorkerMode
+        ) {
+            workerArguments.append("--runtime-test-\(testWorkerMode)")
         }
 #endif
 
@@ -554,11 +649,10 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
                 if errno == EINTR { continue }
                 throw CaptureSupervisorError.workerStreamRead(errno)
             }
-            let terminal = try decoder.finish()
-            let exitCode = terminal.type == .stopped
-                ? EXIT_SUCCESS
-                : EX_SOFTWARE
-            finish(terminalFrame: terminal.frame, exitCode: exitCode)
+            _ = try decoder.finish()
+            finishStopped(
+                exitCode: decoder.errorSeen ? EX_SOFTWARE : EXIT_SUCCESS
+            )
         } catch let error as BoundedOutputError {
             fputs(
                 "whisper-mac-capture: stdout write failed: "
@@ -620,7 +714,11 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
         fputs("whisper-mac-capture: \(message)\n", stderr)
         do {
             finish(
-                terminalFrame: try CaptureProtocol.errorFrame(message: message),
+                readyFrame: try CaptureProtocol.readyFrame(
+                    defaultInputDeviceName: nil
+                ),
+                errorFrame: try CaptureProtocol.errorFrame(message: message),
+                stoppedFrame: try CaptureProtocol.stoppedFrame(),
                 exitCode: exitCode
             )
         } catch {
@@ -631,7 +729,11 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
     private func finishStopped(exitCode: Int32) -> Never {
         do {
             finish(
-                terminalFrame: try CaptureProtocol.stoppedFrame(),
+                readyFrame: try CaptureProtocol.readyFrame(
+                    defaultInputDeviceName: nil
+                ),
+                errorFrame: nil,
+                stoppedFrame: try CaptureProtocol.stoppedFrame(),
                 exitCode: exitCode
             )
         } catch {
@@ -640,7 +742,9 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
     }
 
     private func finish(
-        terminalFrame: Data,
+        readyFrame: Data,
+        errorFrame: Data?,
+        stoppedFrame: Data,
         exitCode: Int32
     ) -> Never {
         guard lifecycle.claimTerminal() else {
@@ -649,7 +753,15 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
         var finalExitCode = exitCode
         outputLock.lock()
         do {
-            try standardOutput.write(terminalFrame)
+            if !readyWritten {
+                try standardOutput.write(readyFrame)
+                readyWritten = true
+            }
+            if let errorFrame, !errorWritten {
+                try standardOutput.write(errorFrame)
+                errorWritten = true
+            }
+            try standardOutput.write(stoppedFrame)
         } catch {
             fputs(
                 "whisper-mac-capture: stdout write failed: "
@@ -675,6 +787,11 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
         defer { outputLock.unlock() }
         guard !lifecycle.snapshot().terminalClaimed else { return }
         try standardOutput.write(frame)
+        if frame.first == CaptureProtocol.MessageType.ready.rawValue {
+            readyWritten = true
+        } else if frame.first == CaptureProtocol.MessageType.error.rawValue {
+            errorWritten = true
+        }
     }
 
     private func cleanup(exitCode: Int32) -> Int32 {
@@ -730,7 +847,7 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
                 try removeCapturePrivateDirectory(
                     path: privateDirectory,
                     remover: { path in
-                        try FileManager.default.removeItem(atPath: path)
+                        try removePrivateDirectoryIfPresent(path: path)
                     }
                 )
                 try injectRuntimeTestCleanupFailure(
@@ -769,8 +886,9 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
     }
 
     private func installSignalHandlers() {
+        let startupStopPending = startupSignalIsPending()
         for signalNumber in [SIGTERM, SIGINT] {
-            Darwin.signal(signalNumber, SIG_IGN)
+            Darwin.signal(signalNumber, retainSignalForDispatch)
             let source = DispatchSource.makeSignalSource(
                 signal: signalNumber,
                 queue: signalQueue
@@ -781,16 +899,31 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
             source.resume()
             signalSources.append(source)
         }
+        unblockStartupSignals()
+        if startupStopPending {
+            signalQueue.async { [weak self] in
+                self?.requestStop()
+            }
+        }
     }
 }
 
 private final class WorkerCleanup: @unchecked Sendable {
     private let descriptor: Int32
+    private let privateDirectory: String
     private let lock = NSLock()
     private var cleaned = false
+    private var orphaned = false
 
-    init(descriptor: Int32) {
+    init(descriptor: Int32, privateDirectory: String) {
         self.descriptor = descriptor
+        self.privateDirectory = privateDirectory
+    }
+
+    func markOrphaned() {
+        lock.lock()
+        orphaned = true
+        lock.unlock()
     }
 
     func run() -> Error? {
@@ -800,11 +933,35 @@ private final class WorkerCleanup: @unchecked Sendable {
             return nil
         }
         cleaned = true
+        let shouldOwnCleanup = orphaned
         lock.unlock()
 
         _ = Darwin.shutdown(descriptor, SHUT_RDWR)
         Darwin.close(descriptor)
-        return nil
+        guard shouldOwnCleanup else { return nil }
+
+        var firstError: Error?
+        do {
+            try removeCapturePrivateDirectory(
+                path: privateDirectory,
+                remover: removePrivateDirectoryIfPresent
+            )
+        } catch {
+            firstError = error
+        }
+        if let label = ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"],
+           label.hasPrefix("com.whispermaxxing.capture.") {
+            do {
+                try requestOwnLaunchdRemoval(label: label)
+            } catch {
+                if firstError == nil { firstError = error }
+            }
+        } else if firstError == nil {
+            firstError = LaunchdWorkerIdentityError.invalidServiceName(
+                ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"]
+            )
+        }
+        return firstError
     }
 }
 
@@ -825,12 +982,20 @@ private func runLaunchdWorker(arguments: [String]) -> Never {
     }
     var optionArguments = Array(arguments.dropFirst())
     var runtimeTestUnresponsive = false
+    var runtimeTestOrphanCleanup = false
+    var runtimeTestStartupFailure = false
 #if WMC_RUNTIME_TEST_HOOKS
-    if let testOptionIndex = optionArguments.firstIndex(
-        of: "--runtime-test-unresponsive"
-    ) {
-        runtimeTestUnresponsive = true
-        optionArguments.remove(at: testOptionIndex)
+    for (option, assign) in [
+        ("--runtime-test-unresponsive", 1),
+        ("--runtime-test-orphan-cleanup", 2),
+        ("--runtime-test-startup-failure", 3),
+    ] {
+        if let testOptionIndex = optionArguments.firstIndex(of: option) {
+            if assign == 1 { runtimeTestUnresponsive = true }
+            if assign == 2 { runtimeTestOrphanCleanup = true }
+            if assign == 3 { runtimeTestStartupFailure = true }
+            optionArguments.remove(at: testOptionIndex)
+        }
     }
 #endif
     let options: CommandLineOptions
@@ -855,7 +1020,12 @@ private func runLaunchdWorker(arguments: [String]) -> Never {
         removeCurrentLaunchdJob()
         Darwin.exit(EX_UNAVAILABLE)
     }
-    let cleanup = WorkerCleanup(descriptor: descriptor)
+    let privateDirectory = URL(fileURLWithPath: socketPath)
+        .deletingLastPathComponent().path
+    let cleanup = WorkerCleanup(
+        descriptor: descriptor,
+        privateDirectory: privateDirectory
+    )
     let output: BoundedOutput
     do {
         output = try BoundedOutput(fileDescriptor: descriptor)
@@ -871,12 +1041,51 @@ private func runLaunchdWorker(arguments: [String]) -> Never {
     if runtimeTestUnresponsive {
         while true { pause() }
     }
+    if runtimeTestOrphanCleanup {
+        var byte = UInt8(0)
+        while true {
+            let count = Darwin.read(descriptor, &byte, 1)
+            if count == 0 { break }
+            if count < 0 && errno == EINTR { continue }
+            if count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) {
+                usleep(1_000)
+                continue
+            }
+            if count < 0 { break }
+        }
+        cleanup.markOrphaned()
+        if let cleanupError = cleanup.run() {
+            printError("cleanup failed: \(cleanupError.localizedDescription)")
+            Darwin.exit(EX_SOFTWARE)
+        }
+        Darwin.exit(EXIT_SUCCESS)
+    }
+    if runtimeTestStartupFailure {
+        do {
+            try output.write(
+                try CaptureProtocol.readyFrame(defaultInputDeviceName: nil)
+            )
+            try output.write(
+                try CaptureProtocol.errorFrame(
+                    message: "Injected worker startup failure."
+                )
+            )
+            try output.write(try CaptureProtocol.stoppedFrame())
+        } catch {
+            cleanup.markOrphaned()
+            _ = cleanup.run()
+            Darwin.exit(EX_IOERR)
+        }
+        _ = cleanup.run()
+        Darwin.exit(EX_SOFTWARE)
+    }
 #endif
 
     CaptureApplication(
         options: options,
         standardOutput: output,
         controlFileDescriptor: descriptor,
+        orphanHandler: cleanup.markOrphaned,
         cleanupHandler: cleanup.run
     ).run()
 }
@@ -886,7 +1095,7 @@ private func removeCurrentLaunchdJob() {
           label.hasPrefix("com.whispermaxxing.capture.")
     else { return }
     do {
-        try removeLaunchdJobChecked(label: label)
+        try requestOwnLaunchdRemoval(label: label)
     } catch {
         printError("cleanup failed: \(error.localizedDescription)")
     }
@@ -936,6 +1145,7 @@ do {
 
 switch options.mode {
 case .version:
+    unblockStartupSignals()
     do {
         try standardOutput.write(Data("\(CaptureProtocol.version)\n".utf8))
     } catch {
@@ -943,6 +1153,7 @@ case .version:
         Darwin.exit(EX_IOERR)
     }
 case .selfTest:
+    unblockStartupSignals()
     do {
         let assertionCount = try writeSelfTest(to: standardOutput)
         fputs(

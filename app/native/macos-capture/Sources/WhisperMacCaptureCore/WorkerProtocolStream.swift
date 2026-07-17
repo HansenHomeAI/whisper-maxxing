@@ -34,6 +34,7 @@ public struct WorkerProtocolTerminal: Equatable, Sendable {
 public struct WorkerProtocolStreamDecoder: Sendable {
     private var storage = Data()
     private var readySeen = false
+    public private(set) var errorSeen = false
     private var terminalFrame: Data?
     public private(set) var terminalType: CaptureProtocol.MessageType?
 
@@ -68,7 +69,7 @@ public struct WorkerProtocolStreamDecoder: Sendable {
                 in: readIndex..<(readIndex + frameLength)
             )
             try validate(type: type, payload: payload)
-            if type == .error || type == .stopped {
+            if type == .stopped {
                 terminalFrame = frame
             } else {
                 frames.append(frame)
@@ -117,22 +118,23 @@ public struct WorkerProtocolStreamDecoder: Sendable {
             }
             readySeen = true
         case .pcm:
-            guard readySeen,
+            guard readySeen, !errorSeen,
                   payload.count == CaptureProtocol.samplesPerFrame
                     * MemoryLayout<Int16>.size
             else {
                 throw WorkerProtocolStreamError.invalidFrame("PCM payload")
             }
         case .error:
-            guard let value = try? JSONDecoder().decode(
+            guard readySeen, !errorSeen,
+                  let value = try? JSONDecoder().decode(
                 CaptureProtocol.ErrorPayload.self,
                 from: payload
             ), !value.message.isEmpty else {
                 throw WorkerProtocolStreamError.invalidFrame("error payload")
             }
-            terminalType = .error
+            errorSeen = true
         case .stopped:
-            guard payload.isEmpty else {
+            guard readySeen, payload.isEmpty else {
                 throw WorkerProtocolStreamError.invalidFrame("stopped payload")
             }
             terminalType = .stopped
