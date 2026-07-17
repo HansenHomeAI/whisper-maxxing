@@ -71,6 +71,11 @@ at `process.resourcesPath/bin/whisper-mac-capture`. Windows never compiles or pa
   large orange component of 80×48 pixels and area 2,909 at 2× scale. D37 therefore
   resolves to AUHAL. AVAudioEngine is no longer permitted as the final native capture
   primitive or fallback.
+- D40: The AUHAL client format is the wire format itself: 16 kHz mono signed Int16 on
+  output scope, input element 1. That configuration passed the real visual gate and emitted
+  exact 640-byte PCM frames. A later device-native-rate AUHAL variant with a separate
+  conversion worker reproduced the large pill, so device-rate staging is forbidden. An
+  incompatible device surfaces an error instead of selecting another backend.
 
 ## Prep commit
 

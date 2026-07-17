@@ -36,3 +36,13 @@ Mode pill. The helper must therefore use AUHAL for input capture. AVAudioEngine 
 remain as the capture primitive or an automatic fallback. ST-M1 is not mergeable until a
 fresh baseline-subtracted pinned-probe run reports zero large components while the same run
 proves real nonzero PCM and a clean stopped frame.
+
+### A2 — Keep the AUHAL client stream at the protocol format
+
+The AUHAL variant that requested 16 kHz mono signed Int16 directly on output scope, input
+element 1 passed the pinned pixel gate. Reconfiguring that same AUHAL to expose the device's
+native sample rate and adding a separate sample-rate-conversion worker reproduced the
+`80×48` large orange component. The final helper must therefore request the protocol's
+16 kHz mono signed Int16 format directly from AUHAL and must not add a device-rate staging
+queue. A device that rejects this client format is a visible native-helper error; it is not
+permission to fall back to AVAudioEngine or Electron capture.
