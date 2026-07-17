@@ -81,3 +81,16 @@ only on the helper's protocol self-test does not satisfy this rule. A package-lo
 may compensate for toolchain discovery differences, but it must execute the same test
 inventory on both Command Line Tools and full-Xcode CI without changing the acceptance
 wrapper or silently double-skipping either path.
+
+### A6 — A4 supersedes A3's direct IOProc requirement
+
+A3 selected a direct HAL IOProc before the decisive launch-context result was understood.
+The unchanged historical AVAudioEngine capture produced real PCM and zero large orange
+components when its microphone-owning process was launched in the GUI launchd domain,
+while the hardened direct-IOProc worker repeatedly blocked in
+`AudioDeviceCreateIOProcID` before readiness. The launchd worker must therefore return to
+the plan's AVAudioEngine-first capture path; A4's supervisor/worker boundary is the behavior
+that suppresses the large pill. If the final packaged live pixel gate disproves that result,
+replace AVAudioEngine with AUHAL inside the same worker as the original plan requires. Do
+not return to direct IOProc, change the protocol or queue bound, add renderer fallback, or
+relax any visual, PCM, lifecycle, or Windows gate.
