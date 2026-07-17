@@ -94,3 +94,16 @@ that suppresses the large pill. If the final packaged live pixel gate disproves 
 replace AVAudioEngine with AUHAL inside the same worker as the original plan requires. Do
 not return to direct IOProc, change the protocol or queue bound, add renderer fallback, or
 relax any visual, PCM, lifecycle, or Windows gate.
+
+### A7 — The supervisor owns bounded launchd cleanup at every phase
+
+Launchd-job leakage has recurred during worker startup and permission-blocked capture. A
+SIGTERM received before submit, during PID discovery, during socket accept, or after the
+worker connects must cancel that phase and remove the submitted job, worker process,
+socket, and private directory before the Electron adapter's one-second grace expires. The
+same bound applies when the worker cannot consume its control byte. Every launchctl
+removal failure or filesystem-cleanup failure must be observable on stderr and through a
+nonzero helper outcome; cleanup errors may not be swallowed. Cancellation and cleanup
+must still produce one byte-complete terminal protocol frame—never a partial frame or a
+second terminal. Tests must exercise the before-submit, after-submit/before-connect, and
+connected-but-unresponsive races rather than relying on the normal fast startup path.
