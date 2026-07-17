@@ -1,7 +1,7 @@
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { BrowserWindow, clipboard, ipcMain } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain } from "electron";
 
 import type { HistoryStore } from "./historyStore.js";
 
@@ -32,8 +32,7 @@ export class SettingsWindowController {
       if (this.window.isMinimized()) {
         this.window.restore();
       }
-      this.window.show();
-      this.window.focus();
+      this.showAndFocus(this.window);
       this.notifyHistoryChanged();
       return;
     }
@@ -54,7 +53,7 @@ export class SettingsWindowController {
       },
     });
     this.window = window;
-    window.once("ready-to-show", () => window.show());
+    window.once("ready-to-show", () => this.showAndFocus(window));
     window.once("closed", () => {
       if (this.window === window) {
         this.window = null;
@@ -62,6 +61,9 @@ export class SettingsWindowController {
     });
     try {
       await window.loadURL(this.rendererUrl);
+      if (!window.isDestroyed()) {
+        this.showAndFocus(window);
+      }
     } catch (error) {
       window.destroy();
       if (this.window === window) {
@@ -69,6 +71,15 @@ export class SettingsWindowController {
       }
       throw error;
     }
+  }
+
+  private showAndFocus(window: BrowserWindow): void {
+    if (process.platform === "darwin") {
+      app.focus({ steal: true });
+    }
+    window.show();
+    window.focus();
+    window.moveTop();
   }
 
   notifyHistoryChanged(): void {
