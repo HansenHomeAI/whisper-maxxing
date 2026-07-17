@@ -194,90 +194,6 @@ private enum CaptureSupervisorError: Error, LocalizedError {
     }
 }
 
-private struct FrameStreamObserver {
-    private var storage = Data()
-    private var readIndex = 0
-    private var readySeen = false
-    private var terminalSeen = false
-    private(set) var lastType: UInt8?
-    private(set) var invalid = false
-
-    mutating func append(_ data: Data) {
-        storage.append(data)
-        while storage.count - readIndex >= 5 {
-            let length = Int(storage[readIndex + 1])
-                | (Int(storage[readIndex + 2]) << 8)
-                | (Int(storage[readIndex + 3]) << 16)
-                | (Int(storage[readIndex + 4]) << 24)
-            guard length <= CaptureProtocol.maximumPayloadBytes else {
-                invalid = true
-                return
-            }
-            guard storage.count - readIndex >= 5 + length else { break }
-            let rawType = storage[readIndex]
-            guard let type = CaptureProtocol.MessageType(rawValue: rawType) else {
-                invalid = true
-                return
-            }
-            let payloadStart = readIndex + 5
-            let payload = storage.subdata(
-                in: payloadStart..<(payloadStart + length)
-            )
-            guard validate(type: type, payload: payload) else {
-                invalid = true
-                return
-            }
-            lastType = rawType
-            readIndex += 5 + length
-        }
-        if readIndex > 65_536 {
-            storage = Data(storage.dropFirst(readIndex))
-            readIndex = 0
-        }
-    }
-
-    var isComplete: Bool {
-        !invalid && readIndex == storage.count
-    }
-
-    private mutating func validate(
-        type: CaptureProtocol.MessageType,
-        payload: Data
-    ) -> Bool {
-        guard !terminalSeen else { return false }
-        switch type {
-        case .ready:
-            guard !readySeen,
-                  let value = try? JSONDecoder().decode(
-                      CaptureProtocol.ReadyPayload.self,
-                      from: payload
-                  ),
-                  value.protocolVersion == CaptureProtocol.version,
-                  value.sampleRateHz == CaptureProtocol.sampleRateHz,
-                  value.channels == CaptureProtocol.channels,
-                  value.sampleFormat == CaptureProtocol.sampleFormat
-            else { return false }
-            readySeen = true
-            return true
-        case .pcm:
-            return readySeen
-                && payload.count == CaptureProtocol.samplesPerFrame
-                    * MemoryLayout<Int16>.size
-        case .error:
-            guard let value = try? JSONDecoder().decode(
-                CaptureProtocol.ErrorPayload.self,
-                from: payload
-            ), !value.message.isEmpty else { return false }
-            terminalSeen = true
-            return true
-        case .stopped:
-            guard payload.isEmpty else { return false }
-            terminalSeen = true
-            return true
-        }
-    }
-}
-
 private final class LaunchdCaptureSupervisor: @unchecked Sendable {
     private let options: CommandLineOptions
     private let standardOutput: BoundedOutput
@@ -423,28 +339,24 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
     }
 
     private func proxyWorker(descriptor: Int32) {
-        var observer = FrameStreamObserver()
+        var decoder = WorkerProtocolStreamDecoder()
         var bytes = [UInt8](repeating: 0, count: 8_192)
         do {
             while true {
                 let count = Darwin.read(descriptor, &bytes, bytes.count)
                 if count > 0 {
                     let data = Data(bytes[0..<count])
-                    observer.append(data)
-                    guard !observer.invalid else {
-                        throw CaptureSupervisorError.invalidWorkerStream
+                    for frame in try decoder.append(data) {
+                        try standardOutput.write(frame)
                     }
-                    try standardOutput.write(data)
                     continue
                 }
                 if count == 0 { break }
                 if errno == EINTR { continue }
                 throw CaptureSupervisorError.workerStreamRead(errno)
             }
-            guard observer.isComplete else {
-                throw CaptureSupervisorError.invalidWorkerStream
-            }
-            let exitCode = observer.lastType == CaptureProtocol.MessageType.stopped.rawValue
+            let terminalType = try decoder.finish()
+            let exitCode = terminalType == .stopped
                 ? EXIT_SUCCESS
                 : EX_SOFTWARE
             finish(exitCode: exitCode)
@@ -584,6 +496,16 @@ private func runLaunchdWorker(arguments: [String]) -> Never {
         printError("Missing launchd worker socket path.")
         Darwin.exit(EX_USAGE)
     }
+    let identity: LaunchdWorkerIdentity
+    do {
+        identity = try LaunchdWorkerIdentity(
+            parentPID: getppid(),
+            serviceName: ProcessInfo.processInfo.environment["XPC_SERVICE_NAME"]
+        )
+    } catch {
+        printError(error.localizedDescription)
+        Darwin.exit(EX_NOPERM)
+    }
     let options: CommandLineOptions
     do {
         options = try CommandLineOptions.parse(
@@ -600,6 +522,7 @@ private func runLaunchdWorker(arguments: [String]) -> Never {
     let descriptor: Int32
     do {
         descriptor = try connectUnixSocket(path: socketPath)
+        try validateUnixSocketPeer(descriptor, identity: identity)
     } catch {
         printError(error.localizedDescription)
         removeCurrentLaunchdJob()

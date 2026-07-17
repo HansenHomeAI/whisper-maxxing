@@ -5,10 +5,19 @@ import Foundation
 public struct SelfTestResult: Sendable {
     public let frames: [Data]
     public let assertionCount: Int
+    public let suites: [SelfTestSuiteResult]
+}
+
+public struct SelfTestSuiteResult: Sendable {
+    public let name: String
+    public let assertionCount: Int
 }
 
 public enum SelfTest {
-    public static func run() throws -> SelfTestResult {
+    public static func run(
+        onlySuiteNamed: String? = nil,
+        includeFilesystemSocketTest: Bool = true
+    ) throws -> SelfTestResult {
         let assertions = SelfTestAssertions()
         let samples = (0..<CaptureProtocol.samplesPerFrame).map { index in
             Int16((index % 200) + 1)
@@ -18,43 +27,191 @@ public enum SelfTest {
             try CaptureProtocol.pcmFrame(samples: samples),
             try CaptureProtocol.stoppedFrame(),
         ]
+        var suites: [SelfTestSuiteResult] = []
 
-        try verifyProtocol(frames: frames, assertions: assertions)
-        try verifySampleChunking(assertions: assertions)
-        try verifyRateConversion(assertions: assertions)
-        try verifyConversionQueue(assertions: assertions)
-        try verifyCommandLine(assertions: assertions)
-        try verifyFrameWriterOrdering(samples: samples, assertions: assertions)
-        try verifyFrameWriterBound(samples: samples, assertions: assertions)
-        try verifyPreReadyBound(samples: samples, assertions: assertions)
-        try verifyBoundedOutput(assertions: assertions)
+        func runSuite(
+            _ name: String,
+            _ body: () throws -> Void
+        ) throws {
+            guard onlySuiteNamed == nil || onlySuiteNamed == name else { return }
+            let previousCount = assertions.count
+            try body()
+            let suiteAssertionCount = assertions.count - previousCount
+            guard suiteAssertionCount > 0 else {
+                throw SelfTestFailure("test suite executed zero assertions: \(name)")
+            }
+            suites.append(SelfTestSuiteResult(
+                name: name,
+                assertionCount: suiteAssertionCount
+            ))
+        }
+
+        try runSuite("CaptureProtocol.readyFrame") {
+            try verifyReadyFrame(frames[0], assertions: assertions)
+        }
+        try runSuite("CaptureProtocol.pcmIsLittleEndian") {
+            try verifyPCMFrame(frames[1], assertions: assertions)
+        }
+        try runSuite("CaptureProtocol.rejectsInvalidFrames") {
+            try verifyProtocolRejections(assertions: assertions)
+        }
+        try runSuite("SampleChunker.chunksFragmentedInput") {
+            try verifySampleChunking(assertions: assertions)
+        }
+        try runSuite("PCMRateConverter.converts44100Hz") {
+            try verifyRateConversion(
+                inputSampleRate: 44_100,
+                assertions: assertions
+            )
+        }
+        try runSuite("PCMRateConverter.converts48000Hz") {
+            try verifyRateConversion(
+                inputSampleRate: 48_000,
+                assertions: assertions
+            )
+        }
+        try runSuite("PCMRateConverter.queueBoundAndStop") {
+            try verifyConversionQueue(assertions: assertions)
+        }
+        try runSuite("PCMRateConverter.rejectsInvalidRate") {
+            try verifyInvalidRate(assertions: assertions)
+        }
+        try runSuite("CommandLineOptions.captureArguments") {
+            try verifyCaptureArguments(assertions: assertions)
+        }
+        try runSuite("CommandLineOptions.helperModes") {
+            try verifyHelperModes(assertions: assertions)
+        }
+        try runSuite("CommandLineOptions.rejectsInvalidArguments") {
+            try verifyCommandLineRejections(assertions: assertions)
+        }
+        try runSuite("FrameWriter.orderedFrames") {
+            try verifyFrameWriterOrdering(samples: samples, assertions: assertions)
+        }
+        try runSuite("FrameWriter.queueIsBounded") {
+            try verifyFrameWriterBound(samples: samples, assertions: assertions)
+        }
+        try runSuite("CaptureOutputPipeline.boundsPreReadyAudio") {
+            try verifyPreReadyBound(samples: samples, assertions: assertions)
+        }
+        try runSuite("BoundedOutput.timesOut") {
+            try verifyBoundedOutput(assertions: assertions)
+        }
+        try runSuite("LaunchdTransport.canonicalizesExecutablePath") {
+            try verifyExecutablePath(assertions: assertions)
+        }
+        try runSuite("LaunchdTransport.retriesFreshDescriptors") {
+            try verifyInjectedConnectionRetry(assertions: assertions)
+            if includeFilesystemSocketTest {
+                try verifySocketRetry(assertions: assertions)
+            }
+        }
+        try runSuite("WorkerProtocol.forwardsCompleteFrames") {
+            try verifyCompleteWorkerFrames(assertions: assertions)
+        }
+        try runSuite("WorkerProtocol.rejectsPartialEOF") {
+            try verifyPartialWorkerEOF(assertions: assertions)
+        }
+        try runSuite("LaunchdWorker.rejectsInvalidIdentity") {
+            try verifyWorkerIdentity(assertions: assertions)
+        }
+        try runSuite("AudioBacklogBudget.boundsTwoSeconds") {
+            try verifyAudioBacklogDuration(assertions: assertions)
+        }
+        try runSuite("AudioBacklogBudget.surfacesOverload") {
+            try verifyAudioBacklogOverload(assertions: assertions)
+        }
+
+        let expectedSuiteCount = onlySuiteNamed == nil ? 22 : 1
+        guard suites.count == expectedSuiteCount else {
+            throw SelfTestFailure(
+                "test inventory mismatch: expected \(expectedSuiteCount), executed \(suites.count)"
+            )
+        }
 
         return SelfTestResult(
             frames: frames,
-            assertionCount: assertions.count
+            assertionCount: assertions.count,
+            suites: suites
         )
     }
 
-    private static func verifyProtocol(
-        frames: [Data],
+    private static func verifyReadyFrame(
+        _ frame: Data,
         assertions: SelfTestAssertions
     ) throws {
-        let decoded = try frames.map(decode)
-        try assertions.expect(decoded.map(\.type) == [1, 2, 4], "protocol frame order")
-        try assertions.expect(decoded[1].payload.count == 640, "PCM payload length")
-        try assertions.expect(decoded[2].payload.isEmpty, "stopped payload")
+        let decoded = try decode(frame)
+        try assertions.expect(
+            decoded.type == CaptureProtocol.MessageType.ready.rawValue,
+            "ready frame type"
+        )
         let ready = try JSONDecoder().decode(
             CaptureProtocol.ReadyPayload.self,
-            from: decoded[0].payload
+            from: decoded.payload
         )
-        try assertions.expect(ready.protocolVersion == 1, "protocol version")
-        try assertions.expect(ready.sampleRateHz == 16_000, "sample rate")
-        try assertions.expect(ready.channels == 1, "channel count")
-        try assertions.expect(ready.sampleFormat == "s16le", "sample format")
         try assertions.expect(
-            ready.defaultInputDeviceName == "Self-Test Input",
-            "self-test device name"
+            ready == CaptureProtocol.ReadyPayload(
+                defaultInputDeviceName: "Self-Test Input"
+            ),
+            "frozen ready payload"
         )
+    }
+
+    private static func verifyPCMFrame(
+        _ unusedFrame: Data,
+        assertions: SelfTestAssertions
+    ) throws {
+        _ = unusedFrame
+        var samples = [Int16](
+            repeating: 0,
+            count: CaptureProtocol.samplesPerFrame
+        )
+        samples[0] = 1
+        samples[1] = -2
+        samples[2] = .max
+        samples[3] = .min
+        let decoded = try decode(CaptureProtocol.pcmFrame(samples: samples))
+        try assertions.expect(
+            decoded.type == CaptureProtocol.MessageType.pcm.rawValue,
+            "PCM frame type"
+        )
+        try assertions.expect(
+            Array(decoded.payload.prefix(8)) == [
+                1, 0, 254, 255, 255, 127, 0, 128,
+            ],
+            "signed PCM little-endian encoding"
+        )
+    }
+
+    private static func verifyProtocolRejections(
+        assertions: SelfTestAssertions
+    ) throws {
+        do {
+            _ = try CaptureProtocol.pcmFrame(samples: [1])
+            throw SelfTestFailure("invalid PCM sample count unexpectedly succeeded")
+        } catch let error as CaptureProtocol.EncodingError {
+            try assertions.expect(
+                error == .wrongSampleCount(1),
+                "wrong PCM sample count rejection"
+            )
+        }
+        do {
+            _ = try CaptureProtocol.frame(
+                type: .error,
+                payload: Data(
+                    repeating: 0,
+                    count: CaptureProtocol.maximumPayloadBytes + 1
+                )
+            )
+            throw SelfTestFailure("oversized protocol payload unexpectedly succeeded")
+        } catch let error as CaptureProtocol.EncodingError {
+            try assertions.expect(
+                error == .payloadTooLarge(
+                    CaptureProtocol.maximumPayloadBytes + 1
+                ),
+                "oversized payload rejection"
+            )
+        }
     }
 
     private static func verifySampleChunking(
@@ -63,55 +220,71 @@ public enum SelfTest {
         let collector = SelfTestChunkCollector()
         let chunker = SampleChunker { collector.append($0) }
         chunker.append(Array(0..<100).map(Int16.init))
-        chunker.append(Array(100..<400).map(Int16.init))
+        chunker.append(Array(100..<319).map(Int16.init))
+        try assertions.expect(collector.snapshot().isEmpty, "fragment retained")
+        chunker.append(Array(319..<700).map(Int16.init))
         let chunks = collector.snapshot()
-        try assertions.expect(chunks.count == 1, "sample chunk count")
+        try assertions.expect(chunks.count == 2, "sample chunk count")
         try assertions.expect(
-            chunks.first == Array(0..<320).map(Int16.init),
-            "sample chunk contents"
+            chunks[0] == Array(0..<320).map(Int16.init),
+            "first sample chunk contents"
         )
-        try assertions.expect(chunker.bufferedSampleCount == 80, "sample remainder")
+        try assertions.expect(
+            chunks[1] == Array(320..<640).map(Int16.init),
+            "second sample chunk contents"
+        )
+        try assertions.expect(chunker.bufferedSampleCount == 60, "sample remainder")
     }
 
     private static func verifyRateConversion(
+        inputSampleRate: Int,
         assertions: SelfTestAssertions
     ) throws {
-        for inputSampleRate in [44_100, 48_000] {
-            let converter = try PCMRateConverter(
-                inputSampleRate: Double(inputSampleRate),
-                outputSampleRate: Double(CaptureProtocol.sampleRateHz)
+        let converter = try PCMRateConverter(
+            inputSampleRate: Double(inputSampleRate),
+            outputSampleRate: Double(CaptureProtocol.sampleRateHz)
+        )
+        let input = (0..<inputSampleRate).map { index in
+            Int16((index % 20_000) - 10_000)
+        }
+        var output: [Int16] = []
+        for start in stride(from: 0, to: input.count, by: 511) {
+            let end = min(start + 511, input.count)
+            output.append(
+                contentsOf: try converter.convert(Array(input[start..<end]))
             )
-            let input = (0..<inputSampleRate).map { index in
-                Int16((index % 20_000) - 10_000)
-            }
-            var output: [Int16] = []
-            for start in stride(from: 0, to: input.count, by: 511) {
-                let end = min(start + 511, input.count)
-                output.append(
-                    contentsOf: try converter.convert(Array(input[start..<end]))
-                )
-            }
-            output.append(contentsOf: try converter.finish())
-            try assertions.expect(
-                output.count == CaptureProtocol.sampleRateHz,
-                "\(inputSampleRate) Hz conversion ratio (received \(output.count))"
-            )
-            try assertions.expect(
-                output.contains { $0 != 0 },
-                "\(inputSampleRate) Hz conversion content"
-            )
+        }
+        output.append(contentsOf: try converter.finish())
+        try assertions.expect(
+            output.count == CaptureProtocol.sampleRateHz,
+            "\(inputSampleRate) Hz conversion ratio (received \(output.count))"
+        )
+        try assertions.expect(
+            output.contains { $0 != 0 },
+            "\(inputSampleRate) Hz conversion content"
+        )
 
-            let collector = SelfTestChunkCollector()
-            let chunker = SampleChunker { collector.append($0) }
-            chunker.append(output)
-            try assertions.expect(
-                collector.snapshot().count == 50,
-                "\(inputSampleRate) Hz conversion chunk count"
-            )
-            try assertions.expect(
-                chunker.bufferedSampleCount == 0,
-                "\(inputSampleRate) Hz conversion chunk remainder"
-            )
+        let collector = SelfTestChunkCollector()
+        let chunker = SampleChunker { collector.append($0) }
+        chunker.append(output)
+        try assertions.expect(
+            collector.snapshot().flatMap { $0 }.count == CaptureProtocol.sampleRateHz,
+            "\(inputSampleRate) Hz conversion chunk contents"
+        )
+        try assertions.expect(
+            chunker.bufferedSampleCount == 0,
+            "\(inputSampleRate) Hz conversion chunk remainder"
+        )
+    }
+
+    private static func verifyInvalidRate(
+        assertions: SelfTestAssertions
+    ) throws {
+        do {
+            _ = try PCMRateConverter(inputSampleRate: 0, outputSampleRate: 16_000)
+            throw SelfTestFailure("invalid input sample rate unexpectedly succeeded")
+        } catch is PCMRateConverterError {
+            try assertions.expect(true, "invalid input sample rate rejection")
         }
     }
 
@@ -155,19 +328,52 @@ public enum SelfTest {
         try assertions.expect(stopped == .stopped, "conversion queue stop")
     }
 
-    private static func verifyCommandLine(
+    private static func verifyCaptureArguments(
         assertions: SelfTestAssertions
     ) throws {
         let options = try CommandLineOptions.parse(arguments: [
             "--preferred-input-device",
-            "Self-Test Microphone",
+            "Microphone $(touch /tmp/never-run)",
             "--enforce-preferred-input-device",
         ])
         try assertions.expect(
-            options.preferredInputDevice == "Self-Test Microphone",
-            "preferred device argument"
+            options == CommandLineOptions(
+                mode: .capture,
+                preferredInputDevice: "Microphone $(touch /tmp/never-run)",
+                enforcePreferredInputDevice: true
+            ),
+            "literal capture device arguments"
         )
-        try assertions.expect(options.enforcePreferredInputDevice, "device enforcement")
+    }
+
+    private static func verifyHelperModes(
+        assertions: SelfTestAssertions
+    ) throws {
+        try assertions.expect(
+            try CommandLineOptions.parse(arguments: ["--self-test"]).mode
+                == .selfTest,
+            "self-test mode"
+        )
+        try assertions.expect(
+            try CommandLineOptions.parse(arguments: ["--version"]).mode
+                == .version,
+            "version mode"
+        )
+    }
+
+    private static func verifyCommandLineRejections(
+        assertions: SelfTestAssertions
+    ) throws {
+        try expectCommandLineError(
+            ["--wat"],
+            expected: .unknownOption("--wat"),
+            assertions: assertions
+        )
+        try expectCommandLineError(
+            ["--preferred-input-device"],
+            expected: .missingValue("--preferred-input-device"),
+            assertions: assertions
+        )
         try expectCommandLineError(
             ["--preferred-input-device", "--self-test"],
             expected: .missingValue("--preferred-input-device"),
@@ -176,6 +382,11 @@ public enum SelfTest {
         try expectCommandLineError(
             ["--enforce-preferred-input-device"],
             expected: .enforcementRequiresPreferredInputDevice,
+            assertions: assertions
+        )
+        try expectCommandLineError(
+            ["--self-test", "--version"],
+            expected: .conflictingModes,
             assertions: assertions
         )
     }
@@ -321,6 +532,260 @@ public enum SelfTest {
         }
     }
 
+    private static func verifyInjectedConnectionRetry(
+        assertions: SelfTestAssertions
+    ) throws {
+        let state = SelfTestRetryState(
+            descriptors: [10, 11, 12],
+            connectErrors: [ECONNREFUSED, ENOENT, 0]
+        )
+        let connected = try retryUnixSocketConnection(
+            timeoutMilliseconds: 10,
+            operations: UnixSocketConnectionOperations(
+                descriptorFactory: state.makeDescriptor,
+                connectAttempt: state.connect,
+                descriptorCloser: state.close,
+                clock: state.clock,
+                backoff: state.backoff
+            )
+        )
+        let snapshot = state.snapshot()
+        try assertions.expect(connected == 12, "retry returns successful descriptor")
+        try assertions.expect(
+            snapshot.attemptedDescriptors == [10, 11, 12],
+            "retry uses a fresh descriptor for every attempt"
+        )
+        try assertions.expect(
+            snapshot.closedDescriptors == [10, 11],
+            "retry closes every failed descriptor"
+        )
+    }
+
+    private static func verifyCompleteWorkerFrames(
+        assertions: SelfTestAssertions
+    ) throws {
+        let ready = try CaptureProtocol.readyFrame(
+            defaultInputDeviceName: "Stream Test"
+        )
+        let pcm = try CaptureProtocol.pcmFrame(
+            samples: [Int16](
+                repeating: 7,
+                count: CaptureProtocol.samplesPerFrame
+            )
+        )
+        let stopped = try CaptureProtocol.stoppedFrame()
+        var decoder = WorkerProtocolStreamDecoder()
+
+        try assertions.expect(
+            try decoder.append(Data(ready.prefix(3))).isEmpty,
+            "partial ready frame is withheld"
+        )
+        var secondChunk = Data(ready.dropFirst(3))
+        secondChunk.append(Data(pcm.prefix(7)))
+        try assertions.expect(
+            try decoder.append(secondChunk) == [ready],
+            "only the byte-complete ready frame is forwarded"
+        )
+        var finalChunk = Data(pcm.dropFirst(7))
+        finalChunk.append(stopped)
+        try assertions.expect(
+            try decoder.append(finalChunk) == [pcm, stopped],
+            "complete PCM and terminal frames are forwarded in order"
+        )
+        try assertions.expect(
+            try decoder.finish() == .stopped,
+            "worker stream terminal is retained"
+        )
+    }
+
+    private static func verifyPartialWorkerEOF(
+        assertions: SelfTestAssertions
+    ) throws {
+        let ready = try CaptureProtocol.readyFrame(
+            defaultInputDeviceName: "Partial EOF Test"
+        )
+        let pcm = try CaptureProtocol.pcmFrame(
+            samples: [Int16](
+                repeating: 1,
+                count: CaptureProtocol.samplesPerFrame
+            )
+        )
+        var decoder = WorkerProtocolStreamDecoder()
+        var bytes = ready
+        bytes.append(Data(pcm.prefix(13)))
+        try assertions.expect(
+            try decoder.append(bytes) == [ready],
+            "partial PCM bytes never leave the decoder"
+        )
+        do {
+            _ = try decoder.finish()
+            throw SelfTestFailure("partial worker EOF unexpectedly succeeded")
+        } catch let error as WorkerProtocolStreamError {
+            try assertions.expect(
+                error == .truncatedFrame(13),
+                "partial worker EOF is rejected"
+            )
+        }
+
+        var missingTerminal = WorkerProtocolStreamDecoder()
+        _ = try missingTerminal.append(ready)
+        do {
+            _ = try missingTerminal.finish()
+            throw SelfTestFailure("unterminated worker stream unexpectedly succeeded")
+        } catch let error as WorkerProtocolStreamError {
+            try assertions.expect(
+                error == .missingTerminalFrame,
+                "missing worker terminal is rejected"
+            )
+        }
+    }
+
+    private static func verifyWorkerIdentity(
+        assertions: SelfTestAssertions
+    ) throws {
+        let identity = try LaunchdWorkerIdentity(
+            parentPID: 1,
+            serviceName: "com.whispermaxxing.capture.4242.012345abcdef"
+        )
+        try assertions.expect(identity.supervisorPID == 4242, "supervisor PID extraction")
+        try identity.validateSupervisorPeer(4242)
+        try assertions.expect(true, "matching supervisor peer")
+
+        do {
+            _ = try LaunchdWorkerIdentity(
+                parentPID: 99,
+                serviceName: "com.whispermaxxing.capture.4242.012345abcdef"
+            )
+            throw SelfTestFailure("non-launchd parent unexpectedly accepted")
+        } catch let error as LaunchdWorkerIdentityError {
+            try assertions.expect(
+                error == .notLaunchdOwned(99),
+                "non-launchd parent rejection"
+            )
+        }
+        do {
+            _ = try LaunchdWorkerIdentity(
+                parentPID: 1,
+                serviceName: "com.whispermaxxing.capture.4242.012345ABCDEF"
+            )
+            throw SelfTestFailure("invalid service nonce unexpectedly accepted")
+        } catch let error as LaunchdWorkerIdentityError {
+            try assertions.expect(
+                error == .invalidServiceName(
+                    "com.whispermaxxing.capture.4242.012345ABCDEF"
+                ),
+                "invalid service label rejection"
+            )
+        }
+        do {
+            try identity.validateSupervisorPeer(4343)
+            throw SelfTestFailure("mismatched supervisor peer unexpectedly accepted")
+        } catch let error as LaunchdWorkerIdentityError {
+            try assertions.expect(
+                error == .unexpectedSupervisorPeer(4242, 4343),
+                "mismatched supervisor peer rejection"
+            )
+        }
+    }
+
+    private static func verifyAudioBacklogDuration(
+        assertions: SelfTestAssertions
+    ) throws {
+        let budget = AudioBacklogBudget()
+        try assertions.expect(
+            budget.reserveInputSamples(96_000, inputSampleRate: 48_000),
+            "two seconds of 48 kHz input fits the shared budget"
+        )
+        try assertions.expect(
+            budget.reservedOutputSampleEquivalent == 32_000,
+            "two-second input maps to one hundred output frames"
+        )
+        try assertions.expect(
+            !budget.reserveInputSamples(1, inputSampleRate: 48_000),
+            "shared budget rejects audio beyond two seconds"
+        )
+        budget.releaseOutputSamples(320)
+        try assertions.expect(
+            budget.reserveInputSamples(960, inputSampleRate: 48_000),
+            "written output releases exactly one frame of shared capacity"
+        )
+    }
+
+    private static func verifyAudioBacklogOverload(
+        assertions: SelfTestAssertions
+    ) throws {
+        let budget = AudioBacklogBudget(maximumPCMFrames: 1)
+        try assertions.expect(
+            budget.reserveInputSamples(320, inputSampleRate: 16_000),
+            "one output frame fills the configured budget"
+        )
+        try assertions.expect(
+            !budget.reserveInputSamples(1, inputSampleRate: 16_000),
+            "full shared budget reports overload without blocking"
+        )
+        try assertions.expect(
+            AudioCaptureError.inputConversionBacklogExceeded.errorDescription
+                == "Core Audio input conversion could not keep up.",
+            "AVAudioEngine tap overload has a visible capture failure"
+        )
+    }
+
+    private static func verifySocketRetry(
+        assertions: SelfTestAssertions
+    ) throws {
+        let suffix = UUID().uuidString.prefix(8)
+        let directory = URL(
+            fileURLWithPath: "/tmp/wmc-st-\(getpid())-\(suffix)"
+        )
+        try FileManager.default.createDirectory(
+            at: directory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let path = directory.appendingPathComponent("capture.sock").path
+        let connection = SelfTestConnectionResult()
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            connection.store(Result {
+                try connectUnixSocket(path: path, timeoutMilliseconds: 2_000)
+            })
+            finished.signal()
+        }
+        usleep(150_000)
+
+        let server = try UnixSocketServer(path: path)
+        defer { server.close() }
+        let accepted = try server.accept(
+            expectedPeerPID: getpid(),
+            timeoutMilliseconds: 2_000
+        )
+        defer { Darwin.close(accepted) }
+        try assertions.expect(
+            finished.wait(timeout: .now() + 2) == .success,
+            "launchd transport connection completed"
+        )
+        guard let connectionResult = connection.take() else {
+            throw SelfTestFailure("launchd transport returned no result")
+        }
+        let connected = try connectionResult.get()
+        defer { Darwin.close(connected) }
+        try assertions.expect(connected >= 0, "launchd transport descriptor")
+
+    }
+
+    private static func verifyExecutablePath(
+        assertions: SelfTestAssertions
+    ) throws {
+        let resolver = ExecutablePathResolver {
+            "/bin/../bin/launchctl"
+        }
+        try assertions.expect(
+            try resolver.resolve() == "/bin/launchctl",
+            "canonical executable path"
+        )
+    }
+
     private static func expectCommandLineError(
         _ arguments: [String],
         expected: CommandLineError,
@@ -463,5 +928,87 @@ private final class SelfTestBlockingSink: @unchecked Sendable {
     func releaseAll() {
         release.signal()
         release.signal()
+    }
+}
+
+private final class SelfTestConnectionResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Result<Int32, Error>?
+
+    func store(_ result: Result<Int32, Error>) {
+        lock.lock()
+        value = result
+        lock.unlock()
+    }
+
+    func take() -> Result<Int32, Error>? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
+    }
+}
+
+private final class SelfTestRetryState: @unchecked Sendable {
+    struct Snapshot {
+        let attemptedDescriptors: [Int32]
+        let closedDescriptors: [Int32]
+    }
+
+    private let lock = NSLock()
+    private var descriptors: [Int32]
+    private var connectErrors: [Int32]
+    private var attemptedDescriptors: [Int32] = []
+    private var closedDescriptors: [Int32] = []
+    private var now: UInt64 = 0
+
+    init(descriptors: [Int32], connectErrors: [Int32]) {
+        self.descriptors = descriptors
+        self.connectErrors = connectErrors
+    }
+
+    func makeDescriptor() throws -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !descriptors.isEmpty else {
+            throw SelfTestFailure("retry requested too many descriptors")
+        }
+        return descriptors.removeFirst()
+    }
+
+    func connect(_ descriptor: Int32) throws -> Int32 {
+        lock.lock()
+        defer { lock.unlock() }
+        attemptedDescriptors.append(descriptor)
+        guard !connectErrors.isEmpty else {
+            throw SelfTestFailure("retry requested too many connect attempts")
+        }
+        return connectErrors.removeFirst()
+    }
+
+    func close(_ descriptor: Int32) {
+        lock.lock()
+        closedDescriptors.append(descriptor)
+        lock.unlock()
+    }
+
+    func clock() -> UInt64 {
+        lock.lock()
+        defer { lock.unlock() }
+        return now
+    }
+
+    func backoff() {
+        lock.lock()
+        now += 1_000_000
+        lock.unlock()
+    }
+
+    func snapshot() -> Snapshot {
+        lock.lock()
+        defer { lock.unlock() }
+        return Snapshot(
+            attemptedDescriptors: attemptedDescriptors,
+            closedDescriptors: closedDescriptors
+        )
     }
 }

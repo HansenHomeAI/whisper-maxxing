@@ -64,11 +64,21 @@ let package = Package(
             name: "WhisperMacCapture",
             dependencies: ["WhisperMacCaptureCore"]
         ),
+        .executableTarget(
+            name: "WhisperMacCaptureTestRunner",
+            dependencies: ["WhisperMacCaptureCore"]
+        ),
         .testTarget(
             name: "WhisperMacCaptureCoreTests",
             dependencies: ["WhisperMacCaptureCore"],
             swiftSettings: testingSwiftSettings,
-            linkerSettings: testingLinkerSettings
+            linkerSettings: testingLinkerSettings,
+            plugins: ["WhisperMacCaptureTestPlugin"]
+        ),
+        .plugin(
+            name: "WhisperMacCaptureTestPlugin",
+            capability: .buildTool(),
+            dependencies: ["WhisperMacCaptureTestRunner"]
         ),
     ]
 )

@@ -41,6 +41,60 @@ public enum LaunchdTransportError: Error, LocalizedError {
     }
 }
 
+public enum LaunchdWorkerIdentityError: Error, LocalizedError, Equatable {
+    case notLaunchdOwned(pid_t)
+    case invalidServiceName(String?)
+    case unexpectedSupervisorPeer(pid_t, pid_t)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notLaunchdOwned(let parentPID):
+            return "The native capture worker was not launched by launchd (parent \(parentPID))."
+        case .invalidServiceName(let name):
+            return "The native capture worker has an invalid launchd service name: \(name ?? "missing")."
+        case .unexpectedSupervisorPeer(let expected, let actual):
+            return "The native capture supervisor identity did not match (expected \(expected), received \(actual))."
+        }
+    }
+}
+
+public struct LaunchdWorkerIdentity: Equatable, Sendable {
+    public let serviceName: String
+    public let supervisorPID: pid_t
+
+    public init(parentPID: pid_t, serviceName: String?) throws {
+        guard parentPID == 1 else {
+            throw LaunchdWorkerIdentityError.notLaunchdOwned(parentPID)
+        }
+        guard let serviceName else {
+            throw LaunchdWorkerIdentityError.invalidServiceName(nil)
+        }
+        let fields = serviceName.split(separator: ".", omittingEmptySubsequences: false)
+        guard fields.count == 5,
+              fields[0] == "com",
+              fields[1] == "whispermaxxing",
+              fields[2] == "capture",
+              let supervisorPID = pid_t(fields[3]),
+              supervisorPID > 1,
+              fields[4].count == 12,
+              fields[4].allSatisfy({ $0.isHexDigit && !$0.isUppercase })
+        else {
+            throw LaunchdWorkerIdentityError.invalidServiceName(serviceName)
+        }
+        self.serviceName = serviceName
+        self.supervisorPID = supervisorPID
+    }
+
+    public func validateSupervisorPeer(_ peerPID: pid_t) throws {
+        guard peerPID == supervisorPID else {
+            throw LaunchdWorkerIdentityError.unexpectedSupervisorPeer(
+                supervisorPID,
+                peerPID
+            )
+        }
+    }
+}
+
 public final class UnixSocketServer: @unchecked Sendable {
     public let path: String
     private let lock = NSLock()
@@ -210,35 +264,97 @@ public struct ExecutablePathResolver: Sendable {
     }
 }
 
+public struct UnixSocketConnectionOperations: Sendable {
+    public typealias DescriptorFactory = @Sendable () throws -> Int32
+    public typealias ConnectAttempt = @Sendable (Int32) throws -> Int32
+    public typealias DescriptorCloser = @Sendable (Int32) -> Void
+    public typealias Clock = @Sendable () -> UInt64
+    public typealias Backoff = @Sendable () -> Void
+
+    let descriptorFactory: DescriptorFactory
+    let connectAttempt: ConnectAttempt
+    let descriptorCloser: DescriptorCloser
+    let clock: Clock
+    let backoff: Backoff
+
+    public init(
+        descriptorFactory: @escaping DescriptorFactory,
+        connectAttempt: @escaping ConnectAttempt,
+        descriptorCloser: @escaping DescriptorCloser,
+        clock: @escaping Clock,
+        backoff: @escaping Backoff
+    ) {
+        self.descriptorFactory = descriptorFactory
+        self.connectAttempt = connectAttempt
+        self.descriptorCloser = descriptorCloser
+        self.clock = clock
+        self.backoff = backoff
+    }
+}
+
+public func retryUnixSocketConnection(
+    timeoutMilliseconds: Int,
+    operations: UnixSocketConnectionOperations
+) throws -> Int32 {
+    precondition(timeoutMilliseconds > 0)
+    let deadline = operations.clock()
+        + UInt64(timeoutMilliseconds) * 1_000_000
+    var lastError = ECONNREFUSED
+
+    while operations.clock() < deadline {
+        let descriptor = try operations.descriptorFactory()
+        let errorCode: Int32
+        do {
+            errorCode = try operations.connectAttempt(descriptor)
+        } catch {
+            operations.descriptorCloser(descriptor)
+            throw error
+        }
+        if errorCode == 0 {
+            return descriptor
+        }
+        lastError = errorCode
+        operations.descriptorCloser(descriptor)
+        guard [ENOENT, ECONNREFUSED, EINTR].contains(lastError) else {
+            throw LaunchdTransportError.connectTimedOut(lastError)
+        }
+        operations.backoff()
+    }
+    throw LaunchdTransportError.connectTimedOut(lastError)
+}
+
 public func connectUnixSocket(
     path: String,
     timeoutMilliseconds: Int = 5_000
 ) throws -> Int32 {
-    precondition(timeoutMilliseconds > 0)
-    let deadline = DispatchTime.now().uptimeNanoseconds
-        + UInt64(timeoutMilliseconds) * 1_000_000
-    var lastError = ECONNREFUSED
+    try retryUnixSocketConnection(
+        timeoutMilliseconds: timeoutMilliseconds,
+        operations: UnixSocketConnectionOperations(
+            descriptorFactory: {
+                let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+                guard descriptor >= 0 else {
+                    throw LaunchdTransportError.socketCreation(errno)
+                }
+                return descriptor
+            },
+            connectAttempt: { descriptor in
+                let status = try withUnixSocketAddress(path: path) { address, size in
+                    Darwin.connect(descriptor, address, size)
+                }
+                return status == 0 ? 0 : errno
+            },
+            descriptorCloser: { Darwin.close($0) },
+            clock: { DispatchTime.now().uptimeNanoseconds },
+            backoff: { usleep(50_000) }
+        )
+    )
+}
 
-    while DispatchTime.now().uptimeNanoseconds < deadline {
-        let descriptor = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
-        guard descriptor >= 0 else {
-            throw LaunchdTransportError.socketCreation(errno)
-        }
-        let status = try withUnixSocketAddress(path: path) { address, size in
-            Darwin.connect(descriptor, address, size)
-        }
-        if status == 0 {
-            return descriptor
-        }
-        lastError = errno
-        Darwin.close(descriptor)
-        guard [ENOENT, ECONNREFUSED, EINTR].contains(lastError) else {
-            throw LaunchdTransportError.connectTimedOut(lastError)
-        }
-        usleep(50_000)
-    }
-
-    throw LaunchdTransportError.connectTimedOut(lastError)
+public func validateUnixSocketPeer(
+    _ descriptor: Int32,
+    identity: LaunchdWorkerIdentity
+) throws {
+    try identity.validateSupervisorPeer(unixSocketPeerPID(descriptor))
 }
 
 private func withUnixSocketAddress<Result>(
