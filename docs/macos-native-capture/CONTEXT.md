@@ -111,6 +111,20 @@ at `process.resourcesPath/bin/whisper-mac-capture`. Windows never compiles or pa
   merge gate, synchronized early-entry cancellation finished in 317 ms, connected
   unresponsive cancellation in 649 ms, and supervisor SIGKILL orphan cleanup in 85 ms;
   every case left zero workers, jobs, sockets, or private directories.
+- D47: A distributable is current when its extracted complete application tree is identical
+  to the freshly built unpacked tree: relative paths, entry types, every regular-file
+  SHA-256, symlink targets, and macOS executable modes must all match. DMG, ZIP, and NSIS
+  integrity and extraction must also succeed, and the packaged helper/application must
+  launch. Merely changing an outer archive timestamp cannot conceal stale code because any
+  payload difference fails the manifest; changing only the timestamp of an otherwise
+  byte-identical payload is not a product defect or a different distributable.
+- D48: ST-M4 merged from helper/package tip
+  `ee790e9ec1d7532b9086c05778b449081998ed56`. Its immutable gate mounted the DMG, extracted
+  the ZIP, launched the helper from both, and compared both full payloads. Windows CI
+  extracted the NSIS payload and nested archives, proved full-tree equality, and found zero
+  Swift/helper artifacts. Exact child-tip CI run `29553420899` passed all five jobs. macOS
+  uses Xcode 16.2/Swift 6 to build the helper and ad-hoc signs the nested executable before
+  package signing; Windows neither selects Swift nor builds or bundles the helper.
 
 ## Prep commit
 
