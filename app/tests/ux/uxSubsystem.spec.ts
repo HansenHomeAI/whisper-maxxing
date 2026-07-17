@@ -61,11 +61,44 @@ describe("UX subsystem detached operations", () => {
       "watchdog callback error: watchdog rejected",
     ]);
     expect(alerts).toEqual([
-      "Dictation Ready",
       "warmup rejected",
       "restore rejected",
       "watchdog rejected",
     ]);
+    subsystem.stop();
+  });
+
+  it("keeps the overlay hidden while the idle subsystem starts", async () => {
+    const alerts: string[] = [];
+    const controller = {
+      warmup: async () => undefined,
+      restoreState: async () => undefined,
+      watchDaemonStatus: async () => undefined,
+      toggleDictation: async () => undefined,
+      retryRobustTranscription: async () => undefined,
+      cancelRecording: async () => undefined,
+      stop: () => undefined,
+    } as unknown as DictationController;
+    const subsystem = createUxSubsystem({
+      controller,
+      alerts: {
+        showAlert(message) {
+          alerts.push(message);
+        },
+      },
+      hotkeys: { register: () => true, unregister: () => undefined },
+      openHistory: async () => undefined,
+      setTimeout: () => ({}),
+      clearTimeout: () => undefined,
+      scheduler: {
+        setInterval: () => ({}),
+        clearInterval: () => undefined,
+      },
+    });
+
+    await subsystem.start();
+
+    expect(alerts).toEqual([]);
     subsystem.stop();
   });
 });

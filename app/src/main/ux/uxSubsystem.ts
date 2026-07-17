@@ -1,7 +1,7 @@
 import type { DictationController } from "./dictationController.js";
 import { registerUxHotkeys, type HotkeyRegistrar } from "./hotkeys.js";
 import type { AlertSink, Logger, Scheduler } from "./types.js";
-import { UX_CONTRACT, UX_MILLISECONDS } from "./uxContract.js";
+import { UX_MILLISECONDS } from "./uxContract.js";
 
 export interface UxSubsystemOptions {
   controller: DictationController;
@@ -69,7 +69,6 @@ export function createUxSubsystem(options: UxSubsystemOptions): UxSubsystem {
       watchdog = intervalScheduler.setInterval(() => {
         runDetached("watchdog callback error", () => options.controller.watchDaemonStatus());
       }, UX_MILLISECONDS.statusWatchdogInterval);
-      await options.alerts.showAlert(UX_CONTRACT.alerts.ready);
     },
     stop() {
       unregisterHotkeys?.();
