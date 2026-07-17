@@ -1,6 +1,7 @@
 appId: com.hansenhomeai.whisper-maxxing
 productName: Whisper Maxxing
 asar: true
+afterPack: build/afterPack.mjs
 directories:
   output: release
 files:
@@ -12,6 +13,9 @@ extraResources:
     to: bin/wdctl.mjs
 artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 mac:
+  extraResources:
+    - from: native/macos-capture/.build/release/whisper-mac-capture
+      to: bin/whisper-mac-capture
   category: public.app-category.productivity
   hardenedRuntime: true
   gatekeeperAssess: false

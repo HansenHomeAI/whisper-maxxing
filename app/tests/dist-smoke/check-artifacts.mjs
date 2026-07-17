@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { access, mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import process from "node:process";
@@ -20,7 +21,9 @@ if (expectedSecondArchive !== null) {
 }
 
 const binary = packagedBinary(releaseRoot);
-await access(path.join(packagedResources(releaseRoot), "bin", "wdctl.mjs"));
+const resources = packagedResources(releaseRoot);
+await access(path.join(resources, "bin", "wdctl.mjs"));
+const nativeCaptureResult = await verifyNativeCaptureArtifact(resources);
 const output = execFileSync(binary, ["--version"], {
   encoding: "utf8",
   stdio: ["ignore", "pipe", "pipe"],
@@ -34,6 +37,73 @@ if (!output.includes(packageJson.version)) {
 
 await verifyCompiledSetup();
 console.log(`Artifact smoke passed: ${path.relative(appRoot, binary)} --version => ${output}`);
+console.log(nativeCaptureResult);
+
+async function verifyNativeCaptureArtifact(resources) {
+  if (process.platform === "darwin") {
+    const helper = path.join(resources, "bin", "whisper-mac-capture");
+    const helperStat = await stat(helper);
+    if (!helperStat.isFile()) {
+      throw new Error(`Bundled native capture helper is not a file: ${helper}`);
+    }
+    await access(helper, constants.X_OK);
+    execFileSync("codesign", ["--verify", "--strict", "--verbose=2", helper], {
+      stdio: ["ignore", "ignore", "pipe"],
+      timeout: 30_000,
+    });
+    const version = execFileSync(helper, ["--version"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+      timeout: 30_000,
+    }).trim();
+    if (version !== "1") {
+      throw new Error(
+        `Bundled native capture protocol mismatch: expected 1, received ${JSON.stringify(version)}`,
+      );
+    }
+    return `Native helper launch passed: ${path.relative(appRoot, helper)} --version => ${version}`;
+  }
+
+  if (process.platform === "win32") {
+    const unpackedRoot = path.dirname(resources);
+    const forbidden = await findForbiddenWindowsNativeArtifacts(unpackedRoot);
+    if (forbidden.length !== 0) {
+      throw new Error(
+        `Windows package contains macOS native capture artifacts: ${forbidden.join(", ")}`,
+      );
+    }
+    return "Windows native helper exclusion passed";
+  }
+
+  throw new Error(`Unsupported artifact smoke platform: ${process.platform}`);
+}
+
+async function findForbiddenWindowsNativeArtifacts(root) {
+  const forbidden = [];
+  const pending = [root];
+  while (pending.length !== 0) {
+    const directory = pending.pop();
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      const relative = path.relative(root, entryPath);
+      const lowerName = entry.name.toLowerCase();
+      if (
+        lowerName === "whisper-mac-capture" ||
+        lowerName === "macos-capture" ||
+        lowerName === ".build" ||
+        lowerName === "package.swift" ||
+        lowerName === "package.resolved" ||
+        lowerName.endsWith(".swift")
+      ) {
+        forbidden.push(relative);
+      }
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      }
+    }
+  }
+  return forbidden.sort();
+}
 
 async function verifyCompiledSetup() {
   const { ensureFirstRunConfig, MAC_ACCESSIBILITY_SETTINGS_URL, MAC_MICROPHONE_SETTINGS_URL } =
