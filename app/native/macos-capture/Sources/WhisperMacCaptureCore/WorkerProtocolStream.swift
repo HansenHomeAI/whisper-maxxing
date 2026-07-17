@@ -26,9 +26,15 @@ public enum WorkerProtocolStreamError: Error, LocalizedError, Equatable {
     }
 }
 
+public struct WorkerProtocolTerminal: Equatable, Sendable {
+    public let type: CaptureProtocol.MessageType
+    public let frame: Data
+}
+
 public struct WorkerProtocolStreamDecoder: Sendable {
     private var storage = Data()
     private var readySeen = false
+    private var terminalFrame: Data?
     public private(set) var terminalType: CaptureProtocol.MessageType?
 
     public init() {}
@@ -58,24 +64,34 @@ public struct WorkerProtocolStreamDecoder: Sendable {
             let payload = storage.subdata(
                 in: payloadStart..<(payloadStart + length)
             )
+            let frame = storage.subdata(
+                in: readIndex..<(readIndex + frameLength)
+            )
             try validate(type: type, payload: payload)
-            frames.append(storage.subdata(in: readIndex..<(readIndex + frameLength)))
+            if type == .error || type == .stopped {
+                terminalFrame = frame
+            } else {
+                frames.append(frame)
+            }
             readIndex += frameLength
         }
         if readIndex > 0 {
             storage = Data(storage.dropFirst(readIndex))
         }
+        guard terminalType == nil || storage.isEmpty else {
+            throw WorkerProtocolStreamError.frameAfterTerminal
+        }
         return frames
     }
 
-    public mutating func finish() throws -> CaptureProtocol.MessageType {
+    public mutating func finish() throws -> WorkerProtocolTerminal {
         guard storage.isEmpty else {
             throw WorkerProtocolStreamError.truncatedFrame(storage.count)
         }
-        guard let terminalType else {
+        guard let terminalType, let terminalFrame else {
             throw WorkerProtocolStreamError.missingTerminalFrame
         }
-        return terminalType
+        return WorkerProtocolTerminal(type: terminalType, frame: terminalFrame)
     }
 
     private mutating func validate(

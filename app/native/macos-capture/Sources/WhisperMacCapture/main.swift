@@ -355,8 +355,9 @@ private final class LaunchdCaptureSupervisor: @unchecked Sendable {
                 if errno == EINTR { continue }
                 throw CaptureSupervisorError.workerStreamRead(errno)
             }
-            let terminalType = try decoder.finish()
-            let exitCode = terminalType == .stopped
+            let terminal = try decoder.finish()
+            try standardOutput.write(terminal.frame)
+            let exitCode = terminal.type == .stopped
                 ? EXIT_SUCCESS
                 : EX_SOFTWARE
             finish(exitCode: exitCode)

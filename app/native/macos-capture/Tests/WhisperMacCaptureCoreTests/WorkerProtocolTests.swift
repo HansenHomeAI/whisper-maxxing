@@ -13,5 +13,10 @@ struct WorkerProtocolTests {
     func rejectsPartialEOF() throws {
         try expectSharedSuite("WorkerProtocol.rejectsPartialEOF")
     }
+
+    @Test("rejects terminal frames followed by one to four trailing bytes")
+    func rejectsTerminalTrailingBytes() throws {
+        try expectSharedSuite("WorkerProtocol.rejectsTerminalTrailingBytes")
+    }
 }
 #endif

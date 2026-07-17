@@ -112,6 +112,9 @@ public enum SelfTest {
         try runSuite("WorkerProtocol.rejectsPartialEOF") {
             try verifyPartialWorkerEOF(assertions: assertions)
         }
+        try runSuite("WorkerProtocol.rejectsTerminalTrailingBytes") {
+            try verifyTerminalTrailingBytes(assertions: assertions)
+        }
         try runSuite("LaunchdWorker.rejectsInvalidIdentity") {
             try verifyWorkerIdentity(assertions: assertions)
         }
@@ -122,7 +125,7 @@ public enum SelfTest {
             try verifyAudioBacklogOverload(assertions: assertions)
         }
 
-        let expectedSuiteCount = onlySuiteNamed == nil ? 22 : 1
+        let expectedSuiteCount = onlySuiteNamed == nil ? 23 : 1
         guard suites.count == expectedSuiteCount else {
             throw SelfTestFailure(
                 "test inventory mismatch: expected \(expectedSuiteCount), executed \(suites.count)"
@@ -589,12 +592,13 @@ public enum SelfTest {
         var finalChunk = Data(pcm.dropFirst(7))
         finalChunk.append(stopped)
         try assertions.expect(
-            try decoder.append(finalChunk) == [pcm, stopped],
-            "complete PCM and terminal frames are forwarded in order"
+            try decoder.append(finalChunk) == [pcm],
+            "complete PCM is forwarded while the terminal is withheld"
         )
+        let terminal = try decoder.finish()
         try assertions.expect(
-            try decoder.finish() == .stopped,
-            "worker stream terminal is retained"
+            terminal.type == .stopped && terminal.frame == stopped,
+            "worker terminal is released only after byte-complete EOF"
         )
     }
 
@@ -636,6 +640,46 @@ public enum SelfTest {
             try assertions.expect(
                 error == .missingTerminalFrame,
                 "missing worker terminal is rejected"
+            )
+        }
+    }
+
+    private static func verifyTerminalTrailingBytes(
+        assertions: SelfTestAssertions
+    ) throws {
+        let stopped = try CaptureProtocol.stoppedFrame()
+        for trailingByteCount in 1...4 {
+            var decoder = WorkerProtocolStreamDecoder()
+            var input = stopped
+            input.append(Data(
+                repeating: 0xa5,
+                count: trailingByteCount
+            ))
+            var externallyWritten: [Data] = []
+            do {
+                externallyWritten.append(contentsOf: try decoder.append(input))
+                externallyWritten.append(try decoder.finish().frame)
+            } catch {
+                externallyWritten.append(try CaptureProtocol.errorFrame(
+                    message: error.localizedDescription
+                ))
+            }
+
+            let decoded = try externallyWritten.map(decode)
+            try assertions.expect(
+                externallyWritten.count == 1,
+                "terminal plus \(trailingByteCount) trailing bytes emits one frame"
+            )
+            try assertions.expect(
+                decoded.map(\.type) == [CaptureProtocol.MessageType.error.rawValue],
+                "terminal plus \(trailingByteCount) trailing bytes emits one error terminal"
+            )
+            try assertions.expect(
+                decoded.filter {
+                    $0.type == CaptureProtocol.MessageType.error.rawValue
+                        || $0.type == CaptureProtocol.MessageType.stopped.rawValue
+                }.count == 1,
+                "terminal plus \(trailingByteCount) trailing bytes never emits two terminals"
             )
         }
     }
