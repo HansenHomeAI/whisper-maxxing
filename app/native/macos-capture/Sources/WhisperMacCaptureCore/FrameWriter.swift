@@ -19,6 +19,7 @@ public final class FrameWriter: @unchecked Sendable {
     private let maximumPendingPCMFrames: Int
     private let sink: Sink
     private let writeFailureHandler: WriteFailureHandler
+    private let backlogBudget: AudioBacklogBudget?
     private let outputQueue = DispatchQueue(label: "whisper.mac.capture.output")
     private let lock = NSLock()
     private var state = State.open
@@ -27,11 +28,13 @@ public final class FrameWriter: @unchecked Sendable {
 
     public init(
         maximumPendingPCMFrames: Int = CaptureProtocol.maximumQueuedPCMFrames,
+        backlogBudget: AudioBacklogBudget? = nil,
         sink: @escaping Sink,
         writeFailureHandler: @escaping WriteFailureHandler
     ) {
         precondition(maximumPendingPCMFrames > 0)
         self.maximumPendingPCMFrames = maximumPendingPCMFrames
+        self.backlogBudget = backlogBudget
         self.sink = sink
         self.writeFailureHandler = writeFailureHandler
     }
@@ -70,6 +73,9 @@ public final class FrameWriter: @unchecked Sendable {
         pendingPCMFrames += 1
         outputQueue.async { [self] in
             defer {
+                backlogBudget?.releaseOutputSamples(
+                    CaptureProtocol.samplesPerFrame
+                )
                 lock.lock()
                 pendingPCMFrames -= 1
                 lock.unlock()

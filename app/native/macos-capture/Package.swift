@@ -56,7 +56,7 @@ let package = Package(
                 ),
             ],
             linkerSettings: [
-                .linkedFramework("AVFoundation"),
+                .linkedFramework("AudioToolbox"),
                 .linkedFramework("CoreAudio"),
             ]
         ),

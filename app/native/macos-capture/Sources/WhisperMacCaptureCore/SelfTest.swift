@@ -21,6 +21,8 @@ public enum SelfTest {
 
         try verifyProtocol(frames: frames, assertions: assertions)
         try verifySampleChunking(assertions: assertions)
+        try verifyRateConversion(assertions: assertions)
+        try verifyConversionQueue(assertions: assertions)
         try verifyCommandLine(assertions: assertions)
         try verifyFrameWriterOrdering(samples: samples, assertions: assertions)
         try verifyFrameWriterBound(samples: samples, assertions: assertions)
@@ -69,6 +71,88 @@ public enum SelfTest {
             "sample chunk contents"
         )
         try assertions.expect(chunker.bufferedSampleCount == 80, "sample remainder")
+    }
+
+    private static func verifyRateConversion(
+        assertions: SelfTestAssertions
+    ) throws {
+        for inputSampleRate in [44_100, 48_000] {
+            let converter = try PCMRateConverter(
+                inputSampleRate: Double(inputSampleRate),
+                outputSampleRate: Double(CaptureProtocol.sampleRateHz)
+            )
+            let input = (0..<inputSampleRate).map { index in
+                Int16((index % 20_000) - 10_000)
+            }
+            var output: [Int16] = []
+            for start in stride(from: 0, to: input.count, by: 511) {
+                let end = min(start + 511, input.count)
+                output.append(
+                    contentsOf: try converter.convert(Array(input[start..<end]))
+                )
+            }
+            output.append(contentsOf: try converter.finish())
+            try assertions.expect(
+                output.count == CaptureProtocol.sampleRateHz,
+                "\(inputSampleRate) Hz conversion ratio (received \(output.count))"
+            )
+            try assertions.expect(
+                output.contains { $0 != 0 },
+                "\(inputSampleRate) Hz conversion content"
+            )
+
+            let collector = SelfTestChunkCollector()
+            let chunker = SampleChunker { collector.append($0) }
+            chunker.append(output)
+            try assertions.expect(
+                collector.snapshot().count == 50,
+                "\(inputSampleRate) Hz conversion chunk count"
+            )
+            try assertions.expect(
+                chunker.bufferedSampleCount == 0,
+                "\(inputSampleRate) Hz conversion chunk remainder"
+            )
+        }
+    }
+
+    private static func verifyConversionQueue(
+        assertions: SelfTestAssertions
+    ) throws {
+        let budget = AudioBacklogBudget(maximumPCMFrames: 1)
+        let output = SelfTestChunkCollector()
+        let errors = SelfTestErrorCollector()
+        let worker = try PCMConversionWorker(
+            inputSampleRate: 48_000,
+            outputSampleRate: Double(CaptureProtocol.sampleRateHz),
+            backlogBudget: budget,
+            outputHandler: output.append,
+            errorHandler: errors.append
+        )
+        let interleavedStereo = (0..<960).flatMap { _ in
+            [Float(0.5), Float(0.25)]
+        }
+        let nativeInput = NativePCMInput(
+            storage: .float32([interleavedStereo]),
+            frameCount: 960,
+            channels: 2,
+            nonInterleaved: false
+        )
+        let accepted = worker.enqueue(nativeInput)
+        try assertions.expect(accepted == .accepted, "conversion queue acceptance")
+        let overflow = [Int16(1)].withUnsafeBufferPointer(worker.enqueue)
+        try assertions.expect(overflow == .overflow, "conversion queue shared bound")
+        worker.waitUntilIdle()
+        let converted = output.snapshot().flatMap { $0 }
+        try assertions.expect(converted.count == 320, "conversion queue output ratio")
+        try assertions.expect(
+            converted.filter { $0 != 0 }.count >= 300,
+            "conversion queue input preservation"
+        )
+        try assertions.expect(worker.pendingBufferCount == 0, "conversion queue drained")
+        try assertions.expect(errors.count == 0, "conversion queue errors")
+        worker.stop()
+        let stopped = [Int16(1)].withUnsafeBufferPointer(worker.enqueue)
+        try assertions.expect(stopped == .stopped, "conversion queue stop")
     }
 
     private static func verifyCommandLine(
