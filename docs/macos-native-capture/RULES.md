@@ -46,3 +46,15 @@ native sample rate and adding a separate sample-rate-conversion worker reproduce
 16 kHz mono signed Int16 format directly from AUHAL and must not add a device-rate staging
 queue. A device that rejects this client format is a visible native-helper error; it is not
 permission to fall back to AVAudioEngine or Electron capture.
+
+### A3 — A2 is superseded; prove direct HAL device input
+
+A2 reconstructed the earlier passing experiment incorrectly. On the actual 48 kHz default
+device, a 16 kHz AUHAL client starts but the first render fails with
+`kAudioUnitErr_CannotDoInCurrentContext` (`-10863`) and emits no PCM; Apple's AUHAL
+contract requires separate sample-rate conversion. The device-rate AUHAL plus conversion
+produces real PCM but has repeatedly reproduced the large pill. The pathfinder must now use
+the lower Core Audio device IOProc API (`AudioDeviceCreateIOProcID`/`AudioDeviceStart`) and
+prove the unchanged zero-large-component plus real-PCM gate. This amendment supersedes A2's
+mandated client format, but not its prohibition on AVAudioEngine/Electron fallback or any
+acceptance criterion.

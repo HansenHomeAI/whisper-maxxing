@@ -76,6 +76,13 @@ at `process.resourcesPath/bin/whisper-mac-capture`. Windows never compiles or pa
   exact 640-byte PCM frames. A later device-native-rate AUHAL variant with a separate
   conversion worker reproduced the large pill, so device-rate staging is forbidden. An
   incompatible device surfaces an error instead of selecting another backend.
+- D41: D40/A2 are superseded by measured behavior. A direct 16 kHz client on the 48 kHz
+  default device fails its first AUHAL render with OSStatus `-10863` and no PCM, while the
+  correct device-rate AUHAL plus converter still reproduces the large pill. The next fixed
+  native primitive is direct HAL device input using `AudioDeviceCreateIOProcID` and
+  `AudioDeviceStart`, with conversion and the wire protocol unchanged. It is mergeable only
+  if the same run proves zero large components and real nonzero PCM; otherwise the objective
+  remains unmet rather than being waived.
 
 ## Prep commit
 
