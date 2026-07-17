@@ -70,3 +70,14 @@ TERM must yield a valid stopped frame; supervisor SIGKILL/socket EOF must make t
 stop and remove its submitted launchd job; application quit must leave neither process nor
 job. This is local process isolation only: no network listener, telemetry, retained audio,
 renderer fallback, permission change, or visual-test relaxation is allowed.
+
+### A5 — A built test target is not an executed test target
+
+The native package twice returned success from `swift test` while the active Command Line
+Tools installation discovered and ran zero tests. ST-M1 is not mergeable unless the
+immutable command visibly executes a nonzero, inventory-pinned set of substantive helper
+tests and fails if discovery or execution returns zero. Compiling test sources or relying
+only on the helper's protocol self-test does not satisfy this rule. A package-local harness
+may compensate for toolchain discovery differences, but it must execute the same test
+inventory on both Command Line Tools and full-Xcode CI without changing the acceptance
+wrapper or silently double-skipping either path.
