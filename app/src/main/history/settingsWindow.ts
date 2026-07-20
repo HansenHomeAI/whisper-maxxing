@@ -76,6 +76,7 @@ export class SettingsWindowController {
   private showAndFocus(window: BrowserWindow): void {
     if (process.platform === "darwin") {
       app.focus({ steal: true });
+      window.setAlwaysOnTop(true, "floating");
     }
     window.show();
     window.focus();
