@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
+import { copyFile, readFile, readdir, stat } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -24,13 +24,19 @@ const startedAt = performance.now();
 
 try {
   const rawCommand = process.argv[2] ?? "status";
-  const command = COMMANDS.get(rawCommand);
-  if (command === undefined) {
-    throw new Error(`Unknown command '${rawCommand}'`);
-  }
-
   const configPath = process.env.WDCTL_CONFIG ?? defaultConfigPath();
   const config = await loadConfig(configPath);
+  if (rawCommand === "diagnostics") {
+    await printDiagnostics(config, process.argv.slice(3));
+    process.exitCode = 0;
+  } else if (rawCommand === "recoveries") {
+    await handleRecoveries(config, process.argv.slice(3));
+    process.exitCode = 0;
+  } else {
+    const command = COMMANDS.get(rawCommand);
+    if (command === undefined) {
+      throw new Error(`Unknown command '${rawCommand}'`);
+    }
   const request = { command };
   if (command === "nextResult" && process.argv[3] !== undefined) {
     request.sessionId = process.argv[3];
@@ -48,6 +54,7 @@ try {
   }
   writeResponse(response);
   process.exitCode = response.ok === true ? 0 : 1;
+  }
 } catch (error) {
   writeResponse({
     ok: false,
@@ -55,6 +62,68 @@ try {
     clientObservedMilliseconds: performance.now() - startedAt,
   });
   process.exitCode = 1;
+}
+
+async function printDiagnostics(config, args) {
+  const sinceIndex = args.indexOf("--since");
+  const since = sinceIndex >= 0 ? args[sinceIndex + 1] : "24h";
+  if (since !== "24h") {
+    throw new Error("diagnostics currently supports only --since 24h.");
+  }
+  const directory = path.join(path.dirname(config.daemonLogPath), "diagnostics");
+  const cutoff = Date.now() - 24 * 60 * 60 * 1_000;
+  const records = [];
+  for (const entry of (await readdir(directory).catch(() => [])).sort()) {
+    if (!entry.startsWith("diagnostics-") || !entry.endsWith(".jsonl")) {
+      continue;
+    }
+    const content = await readFile(path.join(directory, entry), "utf8").catch(() => "");
+    for (const line of content.split("\n")) {
+      if (!line) continue;
+      try {
+        const record = JSON.parse(line);
+        if (Date.parse(record.timestamp) >= cutoff) records.push(record);
+      } catch {
+        // Ignore a torn final journal line.
+      }
+    }
+  }
+  writeResponse({ ok: true, directory, records });
+}
+
+async function handleRecoveries(config, args) {
+  const action = args[0] ?? "list";
+  const directory = path.join(config.tempDirectory, "recovery");
+  if (action === "list") {
+    const recoveries = [];
+    for (const entry of await readdir(directory).catch(() => [])) {
+      if (!entry.endsWith(".json")) continue;
+      try {
+        const metadata = JSON.parse(await readFile(path.join(directory, entry), "utf8"));
+        const wavPath = path.join(directory, `${metadata.sessionId}.wav`);
+        const details = await stat(wavPath);
+        if (metadata.state !== "active") {
+          recoveries.push({ ...metadata, wavPath, fileSizeBytes: details.size });
+        }
+      } catch {
+        // Skip incomplete metadata; startup recovery will reconcile it.
+      }
+    }
+    writeResponse({ ok: true, directory, recoveries });
+    return;
+  }
+  if (action === "export") {
+    const sessionId = args[1];
+    const destination = args[2];
+    if (!sessionId || !/^[a-zA-Z0-9-]+$/.test(sessionId) || !destination) {
+      throw new Error("Usage: wdctl recoveries export <session-id> <destination.wav>");
+    }
+    const source = path.join(directory, `${sessionId}.wav`);
+    await copyFile(source, path.resolve(destination));
+    writeResponse({ ok: true, sessionId, destination: path.resolve(destination) });
+    return;
+  }
+  throw new Error("Usage: wdctl recoveries list | recoveries export <session-id> <destination.wav>");
 }
 
 async function loadConfig(configPath) {

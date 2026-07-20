@@ -1,4 +1,6 @@
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import os from "node:os";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -26,6 +28,12 @@ import {
 } from "./history/index.js";
 import { createTray } from "./tray.js";
 import { configureLaunchAtLogin } from "./loginItem.js";
+import {
+  LocalDiagnostics,
+  RecoveryStore,
+  diagnosticsDirectoryFromLogPath,
+  recoveryDirectoryFromTempDirectory,
+} from "./reliability/index.js";
 import {
   DictationController,
   OverlayWindow,
@@ -68,6 +76,22 @@ async function startApplication(): Promise<void> {
     explicitConfigPath ? { configPath: explicitConfigPath } : {},
   );
   const config = firstRun.config;
+  const processInstanceId = process.env.WD_INSTANCE_NONCE?.trim() || randomUUID();
+  const diagnostics = new LocalDiagnostics(
+    diagnosticsDirectoryFromLogPath(config.daemonLogPath),
+    processInstanceId,
+    config.localDiagnosticsEnabled ?? false,
+    [os.homedir(), app.getPath("userData"), config.tempDirectory, config.salvageDirectory],
+  );
+  await diagnostics.initialize();
+  diagnostics.record({ component: "app", event: "application_started" });
+  const recoveryStore = new RecoveryStore({
+    directory: recoveryDirectoryFromTempDirectory(config.tempDirectory),
+    enabled: config.recordingRecoveryEnabled ?? false,
+    diagnostics,
+    persistRecentCaptures: config.persistRecentCaptures,
+  });
+  await recoveryStore.initialize();
   if (process.env.WD_HEADLESS !== "1") {
     configureLaunchAtLogin(app, config);
   }
@@ -77,6 +101,12 @@ async function startApplication(): Promise<void> {
   const overlay = new OverlayWindow({ rendererUrl: rendererUrl("overlay") });
   const reportError = (error: Error): void => {
     console.error(error);
+    diagnostics.record({
+      severity: "error",
+      component: "app",
+      event: "operational_error",
+      code: error.name,
+    });
     void Promise.resolve()
       .then(() => overlay.showAlert(error.message))
       .catch((alertError: unknown) => console.error(alertError));
@@ -92,6 +122,7 @@ async function startApplication(): Promise<void> {
     source: captureSource.source,
     config,
     onError: reportError,
+    recoveryStore,
   });
   const history = registerSettingsHistory({
     userDataPath: app.getPath("userData"),
@@ -108,6 +139,9 @@ async function startApplication(): Promise<void> {
     onCompleted: history.recordSuccessfulResult,
     requestQuit: () => app.quit(),
     reportError,
+    recoveryStore,
+    diagnostics,
+    processInstanceId,
   });
 
   await daemon.start();

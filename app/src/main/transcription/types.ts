@@ -17,7 +17,9 @@ export interface StoppedCapture {
   startedAt: Date;
   stoppedAt: Date;
   prebufferMilliseconds: number;
-  samples: Int16Array | readonly number[];
+  wavPath?: string;
+  sampleCount?: number;
+  samples?: Int16Array | readonly number[];
   signalMetrics: AudioSignalMetrics;
 }
 
@@ -101,6 +103,11 @@ export interface TranscriptionManagerDependencies {
   cliEnvironment?: NodeJS.ProcessEnv;
   diskStatusProvider?: DiskStatusProvider;
   errorReporter?: (error: Error) => void;
+  diagnosticReporter?: (event: {
+    event: string;
+    sessionId: string;
+    fields?: Readonly<Record<string, string | number | boolean | null>>;
+  }) => void;
 }
 
 export interface TranscriptionManagerOptions {

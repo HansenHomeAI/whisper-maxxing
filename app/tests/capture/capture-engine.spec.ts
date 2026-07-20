@@ -47,7 +47,7 @@ describe("CaptureEngine", () => {
   it("prepends the exact rolling prebuffer bytes to the capture", async () => {
     await startEngineAndFeedFrames(engine, source, clock, 10);
     const fixture = parseMonoPcm16Wav(await readFile(fixturePath));
-    const started = engine.startSession("fast");
+    const started = await engine.startSession("fast");
     expect(started.prebufferMilliseconds).toBe(1_000);
 
     feedFrames(source, clock, 5);
@@ -66,7 +66,7 @@ describe("CaptureEngine", () => {
 
   it("returns exact duration and coverage metrics", async () => {
     await startEngineAndFeedFrames(engine, source, clock, 10);
-    engine.startSession("robust");
+    await engine.startSession("robust");
     feedFrames(source, clock, 5);
 
     const capture = await engine.stopSession(false);
@@ -90,7 +90,7 @@ describe("CaptureEngine", () => {
       dateClock: { nowDate: () => new Date(wallTime) },
     });
     await startEngineAndFeedFrames(engine, source, clock, 10);
-    engine.startSession("fast");
+    await engine.startSession("fast");
     feedFrames(source, clock, 5);
     wallTime += 750;
 
@@ -108,7 +108,7 @@ describe("CaptureEngine", () => {
 
   it("discards without creating a WAV file", async () => {
     await startEngineAndFeedFrames(engine, source, clock, 1);
-    engine.startSession("fast");
+    await engine.startSession("fast");
     feedFrames(source, clock, 1);
 
     await expect(engine.stopSession(true)).resolves.toBeNull();
@@ -118,7 +118,7 @@ describe("CaptureEngine", () => {
 
   it("writes a valid 16 kHz mono s16le WAV header and PCM body", async () => {
     await startEngineAndFeedFrames(engine, source, clock, 1);
-    engine.startSession("fast");
+    await engine.startSession("fast");
     feedFrames(source, clock, 1);
     const capture = await engine.stopSession(false);
     const wav = await readFile(capture!.wavPath);
@@ -267,7 +267,7 @@ describe("CaptureEngine", () => {
       onError: (error) => reported.push(error),
     });
     await startEngineAndFeedFrames(engine, source, clock, 1);
-    engine.startSession("fast");
+    await engine.startSession("fast");
     feedFrames(source, clock, 1);
 
     let thrown: unknown;
@@ -323,8 +323,8 @@ describe("CaptureEngine", () => {
 
   it("rejects duplicate starts and stop without a session", async () => {
     await startEngineAndFeedFrames(engine, source, clock, 1);
-    engine.startSession("fast");
-    expect(() => engine.startSession("robust")).toThrowError(
+    await engine.startSession("fast");
+    await expect(engine.startSession("robust")).rejects.toThrowError(
       new CaptureEngineError(
         "already-recording",
         "A recording is already active.",
