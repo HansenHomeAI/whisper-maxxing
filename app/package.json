@@ -13,7 +13,7 @@
     "build:preload": "vite build --config vite.preload.config.ts",
     "test:unit": "vitest run tests/unit",
     "test:pipeline": "vitest run tests/pipeline",
-    "test:capture": "vitest run tests/capture",
+    "test:capture": "vitest run tests/capture tests/reliability",
     "test:native-capture": "vitest run tests/acceptance/macos-native-capture/*.spec.ts",
     "test:ux": "vitest run tests/ux",
     "test:settings": "vitest run tests/settings",

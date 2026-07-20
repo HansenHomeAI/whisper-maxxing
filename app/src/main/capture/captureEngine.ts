@@ -21,6 +21,10 @@ import {
   systemCaptureDateClock,
 } from "./captureSource.js";
 import { restartElectronApplication } from "./electronRestart.js";
+import type {
+  RecordingSpool,
+  RecoveryStore,
+} from "../reliability/recoveryStore.js";
 
 const SAMPLE_RATE = 16_000;
 const STARTUP_TIMEOUT_MILLISECONDS = 2_000;
@@ -55,7 +59,9 @@ export type CaptureEngineErrorCode =
   | "startup-timed-out"
   | "capture-recovering"
   | "already-recording"
-  | "no-active-session";
+  | "no-active-session"
+  | "session-mismatch"
+  | "recording-storage-failed";
 
 export class CaptureEngineError extends Error {
   constructor(
@@ -72,7 +78,8 @@ interface ActiveCaptureSession {
   transcriptionProfile: TranscriptionProfile;
   startedAt: Date;
   prebufferMilliseconds: number;
-  samples: number[];
+  samples: number[] | null;
+  spool: RecordingSpool | null;
 }
 
 export interface CaptureEngineOptions {
@@ -93,6 +100,8 @@ export interface CaptureEngineOptions {
   startupTimeoutMilliseconds?: number;
   restartRetryDelayMilliseconds?: number;
   createSessionId?: () => string;
+  recoveryStore?: RecoveryStore;
+  onForcedStop?: (capture: StoppedCapture, reason: string) => void | Promise<void>;
 }
 
 export interface CaptureFileSystem {
@@ -114,8 +123,12 @@ export class CaptureEngine {
   private readonly startupTimeoutMilliseconds: number;
   private readonly restartRetryDelayMilliseconds: number;
   private readonly createSessionId: () => string;
+  private readonly recoveryStore: RecoveryStore | null;
+  private forcedStopHandler: (capture: StoppedCapture, reason: string) => void | Promise<void>;
+  private forcedStopInFlight = false;
   private readonly ringBuffer: Int16RingBuffer;
   private activeSession: ActiveCaptureSession | null = null;
+  private sessionStarting = false;
   private engineRunning = false;
   private startupInProgress = false;
   private startupSignaled = false;
@@ -148,6 +161,8 @@ export class CaptureEngine {
     this.restartRetryDelayMilliseconds =
       options.restartRetryDelayMilliseconds ?? RESTART_RETRY_DELAY_MILLISECONDS;
     this.createSessionId = options.createSessionId ?? randomUUID;
+    this.recoveryStore = options.recoveryStore ?? null;
+    this.forcedStopHandler = options.onForcedStop ?? (() => undefined);
     this.ringBuffer = new Int16RingBuffer(
       Math.trunc(options.config.prebufferMilliseconds * 16),
     );
@@ -159,10 +174,10 @@ export class CaptureEngine {
     await this.startSource(generation);
   }
 
-  startSession(profile: TranscriptionProfile): {
+  async startSession(profile: TranscriptionProfile): Promise<{
     sessionId: string;
     prebufferMilliseconds: number;
-  } {
+  }> {
     const readiness = this.readinessAssessment();
     if (!readiness.ready) {
       this.scheduleRestart("session-start-not-ready");
@@ -171,27 +186,58 @@ export class CaptureEngine {
         "Audio input is recovering. Try dictation again in a moment.",
       );
     }
-    if (this.activeSession !== null) {
+    if (this.activeSession !== null || this.sessionStarting) {
       throw new CaptureEngineError(
         "already-recording",
         "A recording is already active.",
       );
     }
 
-    const prebuffer = this.ringBuffer.snapshot();
-    const prebufferMilliseconds = prebuffer.length / 16;
+    let prebuffer = this.ringBuffer.snapshot();
     const sessionId = this.createSessionId().toLowerCase();
+    const startedAt = this.dateClock.nowDate();
+    let spool: RecordingSpool | null = null;
+    this.sessionStarting = true;
+    try {
+      spool =
+        (await this.recoveryStore?.createSpool(
+          sessionId,
+          profile,
+          startedAt,
+          new Int16Array(),
+        )) ?? null;
+      if (spool !== null) {
+        prebuffer = this.ringBuffer.snapshot();
+        spool.metadata.prebufferMilliseconds = prebuffer.length / 16;
+        spool.append(prebuffer);
+        await spool.checkpoint();
+        spool.markStarted();
+      }
+    } catch (error) {
+      const surfaced = new CaptureEngineError(
+        "recording-storage-failed",
+        `Recording storage failed; recording stopped. ${errorMessage(error)}`,
+      );
+      this.surfaceError(surfaced);
+      throw surfaced;
+    } finally {
+      this.sessionStarting = false;
+    }
     this.activeSession = {
       sessionId,
       transcriptionProfile: profile,
-      startedAt: this.dateClock.nowDate(),
-      prebufferMilliseconds,
-      samples: Array.from(prebuffer),
+      startedAt,
+      prebufferMilliseconds: prebuffer.length / 16,
+      samples: spool === null ? Array.from(prebuffer) : null,
+      spool,
     };
-    return { sessionId, prebufferMilliseconds };
+    return { sessionId, prebufferMilliseconds: prebuffer.length / 16 };
   }
 
-  async stopSession(discard: boolean): Promise<StoppedCapture | null> {
+  async stopSession(
+    discard: boolean,
+    expectedSessionId?: string | null,
+  ): Promise<StoppedCapture | null> {
     const session = this.activeSession;
     if (session === null) {
       throw new CaptureEngineError(
@@ -199,17 +245,55 @@ export class CaptureEngine {
         "There is no active recording session.",
       );
     }
+    if (
+      expectedSessionId !== undefined &&
+      expectedSessionId !== null &&
+      expectedSessionId !== session.sessionId
+    ) {
+      throw new CaptureEngineError(
+        "session-mismatch",
+        "The recording session does not match the active session.",
+      );
+    }
     this.activeSession = null;
 
     if (discard) {
+      await session.spool?.cancel();
       this.restartAfterSessionIfNeeded();
       return null;
     }
 
     const stoppedAt = this.dateClock.nowDate();
-    const samples = Int16Array.from(session.samples);
-    const signalMetrics = analyzeSignal(samples);
-    const audioDurationMilliseconds = samples.length / 16;
+    const samples = session.samples === null ? null : Int16Array.from(session.samples);
+    let wavPath: string;
+    let sampleCount: number;
+    let signalMetrics: AudioSignalMetrics;
+    try {
+      if (session.spool !== null) {
+        const finalized = await session.spool.finalize(stoppedAt);
+        wavPath = finalized.wavPath;
+        sampleCount = finalized.metadata.sampleCount;
+        signalMetrics = session.spool.signalMetrics();
+      } else {
+        const fallbackSamples = samples ?? new Int16Array();
+        wavPath = join(this.config.tempDirectory, `${session.sessionId}.wav`);
+        await writeWavAtomically(wavPath, fallbackSamples, this.fileSystem);
+        sampleCount = fallbackSamples.length;
+        signalMetrics = analyzeSignal(fallbackSamples);
+      }
+    } catch (error) {
+      if (session.spool === null) {
+        this.surfaceError(toError(error));
+        throw error;
+      }
+      const surfaced = new CaptureEngineError(
+        "recording-storage-failed",
+        `Recording storage failed; recording stopped. ${errorMessage(error)}`,
+      );
+      this.surfaceError(surfaced);
+      throw surfaced;
+    }
+    const audioDurationMilliseconds = sampleCount / 16;
     const wallClockMilliseconds = Math.max(
       stoppedAt.getTime() - session.startedAt.getTime(),
       0,
@@ -222,14 +306,6 @@ export class CaptureEngine {
       wallClockMilliseconds - activeAudioMilliseconds,
       0,
     );
-    const wavPath = join(this.config.tempDirectory, `${session.sessionId}.wav`);
-    try {
-      await writeWavAtomically(wavPath, samples, this.fileSystem);
-    } catch (error) {
-      this.surfaceError(toError(error));
-      throw error;
-    }
-
     if (signalMetrics.probablySilent) {
       this.scheduleRestart(
         `silent capture detected (peak ${formatDecibels(signalMetrics.peakDecibels)} dBFS, rms ${formatDecibels(signalMetrics.rmsDecibels)} dBFS)`,
@@ -245,7 +321,7 @@ export class CaptureEngine {
       stoppedAt,
       prebufferMilliseconds: session.prebufferMilliseconds,
       wavPath,
-      sampleCount: samples.length,
+      sampleCount,
       audioDurationMilliseconds,
       wallClockMilliseconds,
       activeAudioMilliseconds,
@@ -256,6 +332,32 @@ export class CaptureEngine {
 
   isRecording(): boolean {
     return this.activeSession !== null;
+  }
+
+  currentSessionId(): string | null {
+    return this.activeSession?.sessionId ?? null;
+  }
+
+  setForcedStopHandler(
+    handler: (capture: StoppedCapture, reason: string) => void | Promise<void>,
+  ): void {
+    this.forcedStopHandler = handler;
+  }
+
+  lastFrameAgeMilliseconds(): number | null {
+    return this.lastFrameAtMilliseconds === null
+      ? null
+      : Math.max(this.clock.now() - this.lastFrameAtMilliseconds, 0);
+  }
+
+  async preserveActive(reason: string): Promise<StoppedCapture | null> {
+    if (this.activeSession === null) {
+      return null;
+    }
+    const sessionId = this.activeSession.sessionId;
+    const capture = await this.stopSession(false, sessionId);
+    await this.recoveryStore?.retain(sessionId, reason);
+    return capture;
   }
 
   currentRecordingProfile(): TranscriptionProfile | null {
@@ -277,6 +379,9 @@ export class CaptureEngine {
       secondsSinceLastBuffer,
     );
     if (assessment.reason === "capture-buffer-stale") {
+      if (this.activeSession !== null) {
+        this.forceStopActive("capture_stalled");
+      }
       this.scheduleRestart("capture-buffer-stale");
     }
     return assessment;
@@ -289,7 +394,9 @@ export class CaptureEngine {
   async dispose(): Promise<void> {
     this.disposed = true;
     this.lifecycleGeneration += 1;
-    this.activeSession = null;
+    if (this.activeSession !== null) {
+      await this.preserveActive("shutdown");
+    }
     this.deferredRestartReason = null;
     this.firstFrameRejecter?.(new CaptureLifecycleCancelledError());
     const recovery = this.recoveryPromise;
@@ -388,7 +495,20 @@ export class CaptureEngine {
     }
     this.ringBuffer.append(frame.samples);
     if (this.activeSession !== null) {
-      this.activeSession.samples.push(...frame.samples);
+      try {
+        if (this.activeSession.spool !== null) {
+          this.activeSession.spool.append(frame.samples);
+        } else {
+          this.activeSession.samples?.push(...frame.samples);
+        }
+      } catch (error) {
+        const failure = new CaptureEngineError(
+          "recording-storage-failed",
+          `Recording storage failed; recording stopped. ${errorMessage(error)}`,
+        );
+        this.surfaceError(failure);
+        this.forceStopActive("recording_storage_failed");
+      }
     }
     this.lastFrameAtMilliseconds = this.clock.now();
     if (!this.startupSignaled) {
@@ -430,6 +550,26 @@ export class CaptureEngine {
       this.firstFrameWaiter = null;
       this.firstFrameRejecter = null;
     }
+  }
+
+  private forceStopActive(reason: string): void {
+    if (this.activeSession === null || this.forcedStopInFlight) {
+      return;
+    }
+    const sessionId = this.activeSession.sessionId;
+    this.forcedStopInFlight = true;
+    void Promise.resolve()
+      .then(async () => {
+        const capture = await this.stopSession(false, sessionId);
+        if (capture !== null) {
+          await this.recoveryStore?.retain(sessionId, reason);
+          await this.forcedStopHandler(capture, reason);
+        }
+      })
+      .catch((error: unknown) => this.surfaceError(toError(error)))
+      .finally(() => {
+        this.forcedStopInFlight = false;
+      });
   }
 
   private scheduleRestart(reason: string): void {

@@ -55,6 +55,7 @@ export class DictationController {
   private readonly scheduler: Scheduler;
   private readonly logger: Logger;
   private state: DictationState = "idle";
+  private activeSessionId: string | null = null;
   private profile: TranscriptionProfile = "fast";
   private pendingCount = 0;
   private pendingSessions: PendingSession[] = [];
@@ -145,6 +146,7 @@ export class DictationController {
 
     this.state = "recording";
     this.profile = profile;
+    this.activeSessionId = response.sessionId ?? null;
     try {
       await this.overlay.showRecording(profile);
     } catch (error) {
@@ -173,9 +175,13 @@ export class DictationController {
     }
 
     try {
-      const response = await this.controlClient.send({ command: discard ? "cancel" : "stop" });
+      const response = await this.controlClient.send({
+        command: discard ? "cancel" : "stop",
+        sessionId: this.activeSessionId,
+      });
       this.state = "idle";
       this.profile = "fast";
+      this.activeSessionId = null;
       if (!response.ok) {
         throw new Error(response.error ?? UX_CONTRACT.alerts.stopFailed);
       }
@@ -205,6 +211,7 @@ export class DictationController {
     } catch (error) {
       this.state = "idle";
       this.profile = "fast";
+      this.activeSessionId = null;
       await this.showAlert(errorMessage(error, UX_CONTRACT.alerts.stopFailed));
       if (hideError !== null) {
         await this.surfaceOperationalError("dictation overlay hide error", hideError);
@@ -358,6 +365,7 @@ export class DictationController {
       }
       this.state = "recording";
       this.profile = observedProfile;
+      this.activeSessionId = status.activeSessionId ?? this.activeSessionId;
       return true;
     }
     if (force || this.state === "recording") {
@@ -367,6 +375,7 @@ export class DictationController {
       }
       this.state = "idle";
       this.profile = "fast";
+      this.activeSessionId = null;
     }
     return this.isCurrentStatusObservation(observation);
   }
@@ -416,6 +425,7 @@ export class DictationController {
       this.logSalvage(result.salvagePath);
       const text = normalizeTranscript(result.text);
       if (!text) {
+        await this.acknowledgeResult(result.sessionId, "noOutput");
         await this.showAlert(UX_CONTRACT.alerts.noOutput);
         return;
       }
@@ -428,9 +438,11 @@ export class DictationController {
           appIdentity: await this.pasteEngine.frontmostAppIdentity(),
         };
       } catch (error) {
+        await this.acknowledgeResult(result.sessionId, "pasteFailed");
         await this.surfaceOperationalError("dictation paste error", error);
         return;
       }
+      await this.acknowledgeResult(result.sessionId, "delivered");
       await this.showAlert(
         withPendingCount(this.transcriptReadyLabel(resultProfile), this.pendingCount),
       );
@@ -448,6 +460,21 @@ export class DictationController {
       return;
     }
     await this.showAlert(UX_CONTRACT.alerts.noOutput);
+    await this.acknowledgeResult(result.sessionId, "noOutput");
+  }
+
+  private async acknowledgeResult(
+    sessionId: string,
+    deliveryOutcome: "delivered" | "pasteFailed" | "noOutput",
+  ): Promise<void> {
+    const response = await this.controlClient.send({
+      command: "ackResult",
+      sessionId,
+      deliveryOutcome,
+    });
+    if (!response.ok) {
+      throw new Error(response.error ?? "Unable to acknowledge dictation delivery.");
+    }
   }
 
   private async replacementTargetForLastPaste(): Promise<ReplacementTarget | undefined> {

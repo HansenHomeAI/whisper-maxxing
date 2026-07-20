@@ -9,16 +9,19 @@ export const CONTROL_COMMANDS = [
   "stop",
   "cancel",
   "nextResult",
+  "ackResult",
   "status",
   "shutdown",
   "openSettings",
 ] as const;
 
 export type ControlCommand = (typeof CONTROL_COMMANDS)[number];
+export type DeliveryOutcome = "delivered" | "pasteFailed" | "noOutput";
 
 export interface ControlRequest {
   command: ControlCommand;
   sessionId?: string | null;
+  deliveryOutcome?: DeliveryOutcome | null;
 }
 
 export interface SessionMetrics {
@@ -49,6 +52,9 @@ export interface SessionResultPayload {
 export interface StatusPayload {
   recording: boolean;
   recordingProfile?: string | null;
+  activeSessionId?: string | null;
+  processInstanceId?: string | null;
+  lastFrameAgeMilliseconds?: number | null;
   pendingCount: number;
   engineReady: boolean;
   engineHealthMessage?: string | null;
@@ -88,6 +94,15 @@ export function decodeControlRequest(value: unknown): ControlRequest {
     throw new Error("Unable to decode the control response.");
   }
   if (
+    candidate.deliveryOutcome !== undefined &&
+    candidate.deliveryOutcome !== null &&
+    candidate.deliveryOutcome !== "delivered" &&
+    candidate.deliveryOutcome !== "pasteFailed" &&
+    candidate.deliveryOutcome !== "noOutput"
+  ) {
+    throw new Error("Unable to decode the control response.");
+  }
+  if (
     candidate.sessionId !== undefined &&
     candidate.sessionId !== null &&
     typeof candidate.sessionId !== "string"
@@ -98,6 +113,14 @@ export function decodeControlRequest(value: unknown): ControlRequest {
   const request: ControlRequest = { command: candidate.command as ControlCommand };
   if (candidate.sessionId === null || typeof candidate.sessionId === "string") {
     request.sessionId = candidate.sessionId;
+  }
+  if (
+    candidate.deliveryOutcome === null ||
+    candidate.deliveryOutcome === "delivered" ||
+    candidate.deliveryOutcome === "pasteFailed" ||
+    candidate.deliveryOutcome === "noOutput"
+  ) {
+    request.deliveryOutcome = candidate.deliveryOutcome;
   }
   return request;
 }
@@ -152,6 +175,9 @@ function validateStatus(value: unknown): void {
   requireNumber(status, "prebufferAvailableMilliseconds");
   requireString(status, "serverState");
   optional(status, "recordingProfile", requireStringValue);
+  optional(status, "activeSessionId", requireStringValue);
+  optional(status, "processInstanceId", requireStringValue);
+  optional(status, "lastFrameAgeMilliseconds", requireNumberValue);
   optional(status, "engineHealthMessage", requireStringValue);
   optional(status, "engineStartupMilliseconds", requireNumberValue);
   optional(status, "preferredInputDevice", requireStringValue);

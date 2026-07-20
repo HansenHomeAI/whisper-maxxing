@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
-import { constants as fileConstants } from "node:fs";
+import { constants as fileConstants, openAsBlob } from "node:fs";
 import {
   access,
+  copyFile,
   mkdir,
   readdir,
   rm,
@@ -40,7 +41,6 @@ import type {
   TranscriptionManagerOptions,
 } from "./types.js";
 
-const SAMPLE_RATE = 16_000;
 const RECENT_CAPTURE_LIMIT = 12;
 const VAD_ACTIVATION_MILLISECONDS = 15_000;
 const VAD_MIN_SILENCE_MILLISECONDS = 350;
@@ -51,8 +51,8 @@ const CRITICAL_DISK_SPACE_BYTES = 192 * 1024 * 1024;
 
 interface PendingTranscription {
   capture: StoppedCapture;
-  wavData: Uint8Array;
   wavPath: string;
+  wavData?: Uint8Array;
   enqueuedAt: Date;
 }
 
@@ -116,6 +116,7 @@ export class TranscriptionManager {
   private readonly cliEnvironment: NodeJS.ProcessEnv;
   private readonly diskStatusProvider: DiskStatusProvider;
   private readonly errorReporter: (error: Error) => void;
+  private readonly diagnosticReporter: NonNullable<TranscriptionManagerDependencies["diagnosticReporter"]>;
   private readonly lifecycle = new AsyncMutex();
   private readonly pending: PendingTranscription[] = [];
   private processing = false;
@@ -141,6 +142,7 @@ export class TranscriptionManager {
       dependencies.diskStatusProvider ?? defaultDiskStatusProvider;
     this.errorReporter =
       dependencies.errorReporter ?? ((error) => console.error(error.message));
+    this.diagnosticReporter = dependencies.diagnosticReporter ?? (() => undefined);
 
     if (!isLoopbackControlHost(this.config.whisperServerHost)) {
       throw new Error("whisperServerHost must be loopback-only");
@@ -171,8 +173,10 @@ export class TranscriptionManager {
     };
     const pending: PendingTranscription = {
       capture,
-      wavData: this.lastRetryableCapture.wavData,
-      wavPath: join(this.paths.tempDirectory, `${sessionId}.wav`),
+      wavPath: this.lastRetryableCapture.wavPath,
+      ...(this.lastRetryableCapture.wavData === undefined
+        ? {}
+        : { wavData: this.lastRetryableCapture.wavData }),
       enqueuedAt: this.clock.now(),
     };
     this.lastRetryableCapture = pending;
@@ -183,6 +187,10 @@ export class TranscriptionManager {
 
   pendingCount(): number {
     return this.pending.length + (this.processing ? 1 : 0);
+  }
+
+  lastRetryableSessionId(): string | null {
+    return this.lastRetryableCapture?.capture.sessionId ?? null;
   }
 
   currentServerState(profile: TranscriptionProfile): ServerState {
@@ -224,10 +232,13 @@ export class TranscriptionManager {
   }
 
   private makePending(capture: StoppedCapture): PendingTranscription {
+    const wavPath = capture.wavPath ?? join(this.paths.tempDirectory, `${capture.sessionId}.wav`);
     return {
       capture,
-      wavData: mono16BitPCMData(capture.samples, SAMPLE_RATE),
-      wavPath: join(this.paths.tempDirectory, `${capture.sessionId}.wav`),
+      wavPath,
+      ...(capture.wavPath === undefined && capture.samples !== undefined
+        ? { wavData: mono16BitPCMData(capture.samples, 16_000) }
+        : {}),
       enqueuedAt: this.clock.now(),
     };
   }
@@ -262,6 +273,11 @@ export class TranscriptionManager {
   private async transcribe(
     pending: PendingTranscription,
   ): Promise<SessionResultPayload> {
+    this.diagnosticReporter({
+      event: "transcription_started",
+      sessionId: pending.capture.sessionId,
+      fields: { profile: pending.capture.transcriptionProfile },
+    });
     const queueWaitMilliseconds =
       pending.enqueuedAt.getTime() - pending.capture.stoppedAt.getTime();
     const startedAt = this.clock.now();
@@ -651,7 +667,7 @@ export class TranscriptionManager {
   }
 
   private audioDurationMilliseconds(capture: StoppedCapture): number {
-    return capture.samples.length / 16;
+    return (capture.sampleCount ?? capture.samples?.length ?? 0) / 16;
   }
 
   private transcriptionMode(mode: string, profile: TranscriptionProfile): string {
@@ -867,6 +883,10 @@ export class TranscriptionManager {
   private async transcribeViaServerWithRecovery(
     pending: PendingTranscription,
   ): Promise<TranscriptOutcome> {
+    this.diagnosticReporter({
+      event: "server_attempt_started",
+      sessionId: pending.capture.sessionId,
+    });
     const server = this.serverConfig(pending.capture.transcriptionProfile);
     try {
       await this.ensureServerReady(server, this.startupTimeoutSeconds(server));
@@ -877,6 +897,10 @@ export class TranscriptionManager {
           `Server transcription failed; restarting once: ${errorMessage(firstError)}`,
         ),
       );
+      this.diagnosticReporter({
+        event: "server_attempt_retrying",
+        sessionId: pending.capture.sessionId,
+      });
       await this.restartServer(server.profile);
       const retryServer = this.serverConfig(server.profile);
       try {
@@ -903,13 +927,10 @@ export class TranscriptionManager {
       );
       form.append("vad_speech_pad_ms", String(VAD_SPEECH_PAD_MILLISECONDS));
     }
-    form.append(
-      "file",
-      new Blob([Uint8Array.from(pending.wavData).buffer], {
-        type: "audio/wav",
-      }),
-      basename(pending.wavPath),
-    );
+    const audio = pending.wavData === undefined
+      ? await openAsBlob(pending.wavPath, { type: "audio/wav" })
+      : new Blob([Uint8Array.from(pending.wavData).buffer], { type: "audio/wav" });
+    form.append("file", audio, basename(pending.wavPath));
     const payload = await this.fetchJSONWithTimeout(
       `http://${this.config.whisperServerHost}:${server.port}/inference`,
       { method: "POST", body: form },
@@ -928,6 +949,10 @@ export class TranscriptionManager {
   private async transcribeViaCLI(
     pending: PendingTranscription,
   ): Promise<TranscriptOutcome> {
+    this.diagnosticReporter({
+      event: "cli_attempt_started",
+      sessionId: pending.capture.sessionId,
+    });
     const server = this.serverConfig(pending.capture.transcriptionProfile);
     const timeoutSeconds =
       server.profile === "robust"
@@ -936,9 +961,13 @@ export class TranscriptionManager {
             server.requestTimeoutSeconds,
           )
         : this.config.cliTimeoutSeconds;
-    await mkdir(this.paths.tempDirectory, { recursive: true });
-    await writeFile(pending.wavPath, pending.wavData);
-    let canRemoveWav = true;
+    let removeTemporary = false;
+    let preserveTemporary = false;
+    if (pending.wavData !== undefined) {
+      await mkdir(this.paths.tempDirectory, { recursive: true });
+      await writeFile(pending.wavPath, pending.wavData);
+      removeTemporary = true;
+    }
     try {
       const args = [
         "-m",
@@ -976,7 +1005,7 @@ export class TranscriptionManager {
       );
       if (result.timedOut) {
         if (result.terminationConfirmed === false) {
-          canRemoveWav = false;
+          preserveTemporary = true;
           throw new TranscriptionError(
             `whisper-cli timed out after ${Math.trunc(timeoutSeconds)} seconds and could not be terminated; WAV retained at ${pending.wavPath}`,
           );
@@ -993,10 +1022,8 @@ export class TranscriptionManager {
       }
       return normalizeTranscript(result.stdout);
     } finally {
-      if (canRemoveWav) {
-        await rm(pending.wavPath, { force: true }).catch((error: unknown) =>
-          this.report(error),
-        );
+      if (removeTemporary && !preserveTemporary) {
+        await rm(pending.wavPath, { force: true }).catch((error: unknown) => this.report(error));
       }
     }
   }
@@ -1121,7 +1148,11 @@ export class TranscriptionManager {
     const wavPath = join(this.paths.salvageDirectory, `${base}.wav`);
     try {
       await mkdir(this.paths.salvageDirectory, { recursive: true });
-      await writeFile(wavPath, pending.wavData);
+      if (pending.wavData === undefined) {
+        await copyFile(pending.wavPath, wavPath);
+      } else {
+        await writeFile(wavPath, pending.wavData);
+      }
       if (diagnostic !== null) {
         await writeFile(
           join(this.paths.salvageDirectory, `${base}-diagnostics.json`),
@@ -1159,7 +1190,11 @@ export class TranscriptionManager {
     const wavPath = join(directory, `${base}.wav`);
     try {
       await mkdir(directory, { recursive: true });
-      await writeFile(wavPath, pending.wavData);
+      if (pending.wavData === undefined) {
+        await copyFile(pending.wavPath, wavPath);
+      } else {
+        await writeFile(wavPath, pending.wavData);
+      }
       await writeFile(
         join(directory, `${base}.json`),
         `${JSON.stringify(
