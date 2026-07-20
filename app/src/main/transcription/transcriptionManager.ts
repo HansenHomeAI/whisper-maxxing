@@ -854,11 +854,13 @@ export class TranscriptionManager {
     const model = modelIndex >= 0 ? tokens[modelIndex + 1] : undefined;
     const port = portIndex >= 0 ? tokens[portIndex + 1] : undefined;
     return (
-      executable !== undefined &&
-      model !== undefined &&
-      matchesPathComponent(executable, this.config.whisperServerBinary) &&
-      matchesPathComponent(model, server.modelPath) &&
-      port === String(server.port)
+      (executable !== undefined &&
+        matchesPathComponent(executable, this.config.whisperServerBinary) ||
+        matchesRawCommandExecutable(command, this.config.whisperServerBinary)) &&
+      (model !== undefined && matchesPathComponent(model, server.modelPath) ||
+        matchesRawCommandArgument(command, "-m", server.modelPath)) &&
+      (port === String(server.port) ||
+        matchesRawCommandArgument(command, "--port", String(server.port)))
     );
   }
 
@@ -1317,6 +1319,47 @@ function matchesPathComponent(candidate: string, expected: string): boolean {
   return (
     normalizedCandidate === normalizedExpected ||
     pathComponent(normalizedCandidate) === pathComponent(normalizedExpected)
+  );
+}
+
+function matchesRawCommandExecutable(command: string, expected: string): boolean {
+  const normalizedCommand = normalizePath(command.trim());
+  const normalizedExpected = normalizePath(expected);
+  return commandValueCandidates(normalizedExpected).some((candidate) =>
+    hasDelimitedValue(normalizedCommand, candidate, 0),
+  );
+}
+
+function matchesRawCommandArgument(
+  command: string,
+  flag: string,
+  expected: string,
+): boolean {
+  const normalizedCommand = normalizePath(command.trim());
+  const normalizedExpected = normalizePath(expected);
+  return commandValueCandidates(normalizedExpected).some((value) => {
+    const candidate = `${flag} ${value}`;
+    let offset = normalizedCommand.indexOf(candidate);
+    while (offset >= 0) {
+      if (hasDelimitedValue(normalizedCommand, candidate, offset)) {
+        return true;
+      }
+      offset = normalizedCommand.indexOf(candidate, offset + 1);
+    }
+    return false;
+  });
+}
+
+function commandValueCandidates(value: string): string[] {
+  return [value, `"${value}"`, `'${value}'`];
+}
+
+function hasDelimitedValue(command: string, value: string, offset: number): boolean {
+  const before = offset === 0 ? "" : command[offset - 1];
+  const after = command[offset + value.length];
+  return (
+    (before === "" || /\s/u.test(before ?? "")) &&
+    (after === undefined || /\s/u.test(after))
   );
 }
 

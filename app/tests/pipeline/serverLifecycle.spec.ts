@@ -132,6 +132,30 @@ describe("whisper-server lifecycle", () => {
     expect(harness.manager.currentServerState("fast")).toBe("ready");
   });
 
+  it("recognizes unquoted server paths containing spaces", async () => {
+    const port = await reservePort();
+    const server = new FakeWhisperServer();
+    const binary = "/Users/example/Library/Application Support/Whisper/whisper-server";
+    const model = "/Users/example/Library/Application Support/Whisper/model.bin";
+    const spawner = new LifecycleSpawner(server, [
+      {
+        pid: 95,
+        command:
+          `${binary} -m ${model} --host 127.0.0.1 --port ${port} -t 4`,
+      },
+    ]);
+    const harness = await lifecycleHarness(port, spawner, {
+      whisperServerBinary: binary,
+      whisperModelPath: model,
+    });
+
+    await harness.manager.prewarmServerIfNeeded();
+
+    expect(spawner.terminated).toEqual([{ pid: 95, force: false }]);
+    expect(spawner.spawns).toHaveLength(1);
+    expect(harness.manager.currentServerState("fast")).toBe("ready");
+  });
+
   it("force-kills a stale server and verifies it exited", async () => {
     const port = await reservePort();
     const server = new FakeWhisperServer();
@@ -324,6 +348,7 @@ class LifecycleManagedProcess implements ManagedProcess {
 async function lifecycleHarness(
   port: number,
   spawner: ProcessSpawner,
+  overrides: Partial<AppConfig> = {},
 ): Promise<{
   manager: TranscriptionManager;
   results: SessionResultPayload[];
@@ -331,7 +356,7 @@ async function lifecycleHarness(
 }> {
   const root = await mkdtemp(join(tmpdir(), "whisper-lifecycle-"));
   roots.push(root);
-  const config = configFor(root, port);
+  const config = { ...configFor(root, port), ...overrides };
   const results: SessionResultPayload[] = [];
   const reportedErrors: Error[] = [];
   const manager = new TranscriptionManager({
