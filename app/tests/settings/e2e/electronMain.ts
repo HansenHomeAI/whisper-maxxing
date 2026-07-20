@@ -1,4 +1,4 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { access, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { app } from "electron";
@@ -17,6 +17,7 @@ const preloadPath = requireEnvironment("WD_E2E_PRELOAD_PATH");
 const readyPath = requireEnvironment("WD_E2E_READY_PATH");
 const errorPath = requireEnvironment("WD_E2E_ERROR_PATH");
 const recordedPath = requireEnvironment("WD_E2E_RECORDED_PATH");
+const recordTriggerPath = requireEnvironment("WD_E2E_RECORD_TRIGGER_PATH");
 const recordedNonce = requireEnvironment("WD_E2E_RECORDED_NONCE");
 const userDataPath = path.dirname(configPath);
 
@@ -48,20 +49,12 @@ async function start(): Promise<void> {
       },
       onError: reportError,
     });
-    let recordingScheduled = false;
     const server = new JSONSocketServer(
       requireString(config, "controlHost"),
       requireNumber(config, "controlPort"),
       async (request: ControlRequest) => {
         if (request.command === "openSettings") {
-          const response = await requireHandler(handlers, "openSettings")(request);
-          if (!recordingScheduled) {
-            recordingScheduled = true;
-            setTimeout(() => {
-              void recordResult(registration, recordedNonce, recordedPath);
-            }, 100);
-          }
-          return response;
+          return requireHandler(handlers, "openSettings")(request);
         }
         if (request.command === "status") {
           return { ok: true };
@@ -72,6 +65,12 @@ async function start(): Promise<void> {
     );
     await server.start();
     await writeFile(readyPath, "ready", "utf8");
+    void recordResultAfterTrigger(
+      registration,
+      recordedNonce,
+      recordedPath,
+      recordTriggerPath,
+    ).catch(reportError);
 
     app.on("before-quit", () => {
       registration.dispose();
@@ -90,6 +89,23 @@ async function start(): Promise<void> {
   function reportError(error: Error): void {
     void writeFile(errorPath, error.stack ?? error.message);
   }
+}
+
+async function recordResultAfterTrigger(
+  registration: ReturnType<typeof registerSettingsHistory>,
+  text: string,
+  markerPath: string,
+  triggerPath: string,
+): Promise<void> {
+  while (true) {
+    try {
+      await access(triggerPath);
+      break;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  await recordResult(registration, text, markerPath);
 }
 
 function requireHandler(

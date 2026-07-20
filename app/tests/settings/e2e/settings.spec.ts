@@ -41,6 +41,7 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
   const readyPath = path.join(temporaryDirectory, "ready");
   const errorPath = path.join(temporaryDirectory, "error.log");
   const recordedPath = path.join(temporaryDirectory, "recorded");
+  const recordTriggerPath = path.join(temporaryDirectory, "record-trigger");
   const firstNonce = `alpha-${randomUUID()}`;
   const secondNonce = `bravo-${randomUUID()}`;
   const recordedNonce = `recorded-${randomUUID()}`;
@@ -74,6 +75,7 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
       WD_E2E_READY_PATH: readyPath,
       WD_E2E_ERROR_PATH: errorPath,
       WD_E2E_RECORDED_PATH: recordedPath,
+      WD_E2E_RECORD_TRIGGER_PATH: recordTriggerPath,
       WD_E2E_RECORDED_NONCE: recordedNonce,
     },
   });
@@ -98,6 +100,7 @@ test("opens real seeded history through wdctl and clears the JSONL file", async 
     )
     .toBe(secondNonce);
 
+  await writeFile(recordTriggerPath, "record", "utf8");
   await waitForReady(recordedPath, errorPath, "recorded");
   await expect(readFile(historyPath, "utf8")).resolves.toContain(recordedNonce);
   await expect(renderedEntries).toHaveText([
