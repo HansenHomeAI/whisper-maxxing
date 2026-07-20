@@ -1,5 +1,7 @@
 export const DEFAULT_PERSIST_RECENT_CAPTURES = false;
 export const DEFAULT_PERSIST_HISTORY = true;
+export const DEFAULT_LOCAL_DIAGNOSTICS_ENABLED = false;
+export const DEFAULT_RECORDING_RECOVERY_ENABLED = false;
 export const DEFAULT_SERVER_REQUEST_TIMEOUT_SECONDS = 30;
 export const DEFAULT_ROBUST_SERVER_REQUEST_TIMEOUT_SECONDS = 120;
 export const DEFAULT_CLI_TIMEOUT_SECONDS = 90;
@@ -38,6 +40,8 @@ export interface AppConfig {
   whisperThreads: number;
   persistRecentCaptures: boolean;
   persistHistory: boolean;
+  localDiagnosticsEnabled?: boolean;
+  recordingRecoveryEnabled?: boolean;
   serverRequestTimeoutSeconds: number;
   robustServerRequestTimeoutSeconds: number;
   cliTimeoutSeconds: number;
@@ -136,6 +140,16 @@ export function parseAppConfig(value: unknown): AppConfig {
       source,
       "persistHistory",
       DEFAULT_PERSIST_HISTORY,
+    ),
+    localDiagnosticsEnabled: optionalBoolean(
+      source,
+      "localDiagnosticsEnabled",
+      DEFAULT_LOCAL_DIAGNOSTICS_ENABLED,
+    ),
+    recordingRecoveryEnabled: optionalBoolean(
+      source,
+      "recordingRecoveryEnabled",
+      DEFAULT_RECORDING_RECOVERY_ENABLED,
     ),
     serverRequestTimeoutSeconds,
     robustServerRequestTimeoutSeconds,

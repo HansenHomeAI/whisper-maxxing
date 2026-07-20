@@ -1,4 +1,4 @@
-import { readFile, statfs } from "node:fs/promises";
+import { open, statfs } from "node:fs/promises";
 
 import {
   JSONSocketServer,
@@ -20,6 +20,7 @@ import {
   TranscriptionManager,
   type StoppedCapture as TranscriptionStoppedCapture,
 } from "./transcription/index.js";
+import type { LocalDiagnostics, RecoveryStore } from "./reliability/index.js";
 
 const LOW_DISK_SPACE_BYTES = 512 * 1024 * 1024;
 
@@ -31,6 +32,9 @@ export interface ElectronDaemonOptions {
   onCompleted?(result: SessionResultPayload): void | Promise<void>;
   requestQuit(): void | Promise<void>;
   reportError?(error: Error): void;
+  recoveryStore?: RecoveryStore;
+  diagnostics?: LocalDiagnostics;
+  processInstanceId?: string;
 }
 
 export class ElectronDaemon {
@@ -47,6 +51,10 @@ export class ElectronDaemon {
   private readonly transcriptionManager: TranscriptionManager;
   private readonly controlServer: JSONSocketServer;
   private disposePromise: Promise<void> | null = null;
+  private readonly recoveryStore: RecoveryStore | null;
+  private readonly diagnostics: LocalDiagnostics | null;
+  private readonly processInstanceId: string;
+  private readonly recoveryOwners = new Map<string, string>();
 
   constructor(options: ElectronDaemonOptions) {
     this.config = options.config;
@@ -56,11 +64,27 @@ export class ElectronDaemon {
     this.onCompleted = options.onCompleted ?? (() => undefined);
     this.requestQuit = options.requestQuit;
     this.reportError = options.reportError ?? ((error) => console.error(error));
+    this.recoveryStore = options.recoveryStore ?? null;
+    this.diagnostics = options.diagnostics ?? null;
+    this.processInstanceId = options.processInstanceId ?? "unknown";
     this.transcriptionManager = new TranscriptionManager({
       config: this.config,
       paths: appPaths(this.config),
       onCompleted: (result) => this.storeCompleted(result),
-      dependencies: { errorReporter: this.reportError },
+      dependencies: {
+        errorReporter: this.reportError,
+        diagnosticReporter: (event) =>
+          this.diagnostics?.record({
+            component: "transcription",
+            event: event.event,
+            sessionId: event.sessionId,
+            ...(event.fields === undefined ? {} : { fields: event.fields }),
+          }),
+      },
+    });
+    this.captureEngine.setForcedStopHandler(async (capture, reason) => {
+      await this.recoveryStore?.retain(capture.sessionId, reason);
+      this.transcriptionManager.enqueue(await transcriptionCapture(capture));
     });
     this.controlServer = new JSONSocketServer(
       this.config.controlHost,
@@ -87,13 +111,15 @@ export class ElectronDaemon {
       case "startRobust":
         return this.startCapture("robust");
       case "stop":
-        return this.stopCapture(false);
+        return this.stopCapture(false, request.sessionId);
       case "cancel":
-        return this.stopCapture(true);
+        return this.stopCapture(true, request.sessionId);
       case "retryRobust":
         return this.retryRobust();
       case "nextResult":
         return this.nextResult(request.sessionId);
+      case "ackResult":
+        return this.ackResult(request.sessionId, request.deliveryOutcome);
       case "status":
         return this.statusResponse();
       case "openSettings":
@@ -114,9 +140,9 @@ export class ElectronDaemon {
     await disposePromise;
   }
 
-  private startCapture(profile: TranscriptionProfile): ControlResponse {
+  private async startCapture(profile: TranscriptionProfile): Promise<ControlResponse> {
     try {
-      const started = this.captureEngine.startSession(profile);
+      const started = await this.captureEngine.startSession(profile);
       return {
         ok: true,
         recording: true,
@@ -129,9 +155,12 @@ export class ElectronDaemon {
     }
   }
 
-  private async stopCapture(discard: boolean): Promise<ControlResponse> {
+  private async stopCapture(
+    discard: boolean,
+    expectedSessionId?: string | null,
+  ): Promise<ControlResponse> {
     try {
-      const capture = await this.captureEngine.stopSession(discard);
+      const capture = await this.captureEngine.stopSession(discard, expectedSessionId);
       if (capture !== null) {
         this.transcriptionManager.enqueue(await transcriptionCapture(capture));
       }
@@ -158,7 +187,14 @@ export class ElectronDaemon {
       };
     }
     try {
+      const sourceSessionId = this.transcriptionManager.lastRetryableSessionId();
+      if (sourceSessionId !== null) {
+        this.recoveryStore?.hold(sourceSessionId);
+      }
       const sessionId = this.transcriptionManager.enqueueRobustRetry();
+      if (sourceSessionId !== null) {
+        this.recoveryOwners.set(sessionId, sourceSessionId);
+      }
       return {
         ok: true,
         recording: false,
@@ -182,6 +218,23 @@ export class ElectronDaemon {
     };
   }
 
+  private async ackResult(
+    sessionId?: string | null,
+    outcome?: "delivered" | "pasteFailed" | "noOutput" | null,
+  ): Promise<ControlResponse> {
+    if (!sessionId || !outcome) {
+      return { ok: false, error: "ackResult requires sessionId and deliveryOutcome." };
+    }
+    try {
+      const recoverySessionId = this.recoveryOwners.get(sessionId) ?? sessionId;
+      await this.recoveryStore?.acknowledge(recoverySessionId, outcome);
+      this.recoveryOwners.delete(sessionId);
+      return { ok: true };
+    } catch (error) {
+      return failure(error);
+    }
+  }
+
   private async statusResponse(): Promise<ControlResponse> {
     const recording = this.captureEngine.isRecording();
     return {
@@ -197,6 +250,9 @@ export class ElectronDaemon {
     return {
       recording,
       recordingProfile: this.captureEngine.currentRecordingProfile(),
+      activeSessionId: this.captureEngine.currentSessionId(),
+      processInstanceId: this.processInstanceId,
+      lastFrameAgeMilliseconds: this.captureEngine.lastFrameAgeMilliseconds(),
       pendingCount: this.outstandingResultCount(),
       engineReady: readiness.ready,
       engineHealthMessage: captureHealthMessage(readiness.reason),
@@ -235,7 +291,27 @@ export class ElectronDaemon {
   private storeCompleted(result: SessionResultPayload): void {
     this.completedResults.append(result);
     void Promise.resolve()
-      .then(() => this.onCompleted(result))
+      .then(async () => {
+        const recoverySessionId = this.recoveryOwners.get(result.sessionId) ?? result.sessionId;
+        if (result.text.length > 0 && !result.errorMessage) {
+          await this.recoveryStore?.awaitingDelivery(recoverySessionId);
+        } else {
+          await this.recoveryStore?.retain(
+            recoverySessionId,
+            result.errorMessage ? "transcription_failed" : "no_output",
+          );
+        }
+        this.diagnostics?.record({
+          component: "transcription",
+          event: "transcription_completed",
+          sessionId: result.sessionId,
+          fields: {
+            hasText: result.text.length > 0,
+            hasError: Boolean(result.errorMessage),
+          },
+        });
+        await this.onCompleted(result);
+      })
       .catch((error: unknown) => this.reportError(asError(error)));
   }
 
@@ -256,10 +332,17 @@ export class ElectronDaemon {
 
   private async disposeResources(): Promise<void> {
     const failures: Error[] = [];
+    if (this.captureEngine.isRecording()) {
+      try {
+        await this.captureEngine.preserveActive("shutdown");
+      } catch (error) {
+        failures.push(asError(error));
+      }
+    }
     for (const dispose of [
       () => this.controlServer.stop(),
-      () => this.transcriptionManager.stop(),
       () => this.captureEngine.dispose(),
+      () => this.transcriptionManager.stop(),
     ]) {
       try {
         await dispose();
@@ -276,22 +359,25 @@ export class ElectronDaemon {
 async function transcriptionCapture(
   capture: CaptureStoppedCapture,
 ): Promise<TranscriptionStoppedCapture> {
-  const wav = await readFile(capture.wavPath);
-  if (
-    wav.length < 44 ||
-    wav.toString("ascii", 0, 4) !== "RIFF" ||
-    wav.toString("ascii", 8, 12) !== "WAVE" ||
-    wav.toString("ascii", 36, 40) !== "data"
-  ) {
-    throw new Error(`Capture WAV is invalid: ${capture.wavPath}`);
-  }
-  const dataLength = wav.readUInt32LE(40);
-  if (dataLength % 2 !== 0 || 44 + dataLength > wav.length) {
-    throw new Error(`Capture WAV data is invalid: ${capture.wavPath}`);
-  }
-  const samples = new Int16Array(dataLength / 2);
-  for (let index = 0; index < samples.length; index += 1) {
-    samples[index] = wav.readInt16LE(44 + index * 2);
+  const handle = await open(capture.wavPath, "r");
+  const header = Buffer.alloc(44);
+  try {
+    const { bytesRead } = await handle.read(header, 0, header.length, 0);
+    if (
+      bytesRead < 44 ||
+      header.toString("ascii", 0, 4) !== "RIFF" ||
+      header.toString("ascii", 8, 12) !== "WAVE" ||
+      header.toString("ascii", 36, 40) !== "data"
+    ) {
+      throw new Error(`Capture WAV is invalid: ${capture.wavPath}`);
+    }
+    const dataLength = header.readUInt32LE(40);
+    const details = await handle.stat();
+    if (dataLength % 2 !== 0 || 44 + dataLength > details.size) {
+      throw new Error(`Capture WAV data is invalid: ${capture.wavPath}`);
+    }
+  } finally {
+    await handle.close();
   }
   return {
     sessionId: capture.sessionId,
@@ -299,7 +385,8 @@ async function transcriptionCapture(
     startedAt: capture.startedAt,
     stoppedAt: capture.stoppedAt,
     prebufferMilliseconds: capture.prebufferMilliseconds,
-    samples,
+    wavPath: capture.wavPath,
+    sampleCount: capture.sampleCount,
     signalMetrics: capture.signalMetrics,
   };
 }

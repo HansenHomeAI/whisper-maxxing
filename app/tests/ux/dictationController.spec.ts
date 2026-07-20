@@ -408,6 +408,9 @@ function makeHarness(responses: Array<ControlResponse | Error>) {
   const controlClient: ControlClient = {
     async send(request) {
       requests.push(request);
+      if (request.command === "ackResult") {
+        return ok();
+      }
       const response = responses.shift();
       if (response instanceof Error) {
         throw response;

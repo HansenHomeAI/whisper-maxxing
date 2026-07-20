@@ -5,6 +5,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { appendFileSync, openSync, closeSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import net from "node:net";
 
 import {
   sendControl,
@@ -28,6 +29,10 @@ export async function startManagedElectronTarget(
   }
   const appRoot = path.resolve(import.meta.dirname, "../../..");
   const transcriptNonce = randomUUID();
+  const instanceNonce = randomUUID();
+  target.port = await freeLoopbackPort();
+  const fastServerPort = await freeLoopbackPort();
+  const robustServerPort = await freeLoopbackPort();
   buildProductionApp(appRoot);
   const root = await mkdtemp(path.join(os.tmpdir(), "whisper-electron-e2e-"));
   const tempDirectory = path.join(root, "captures");
@@ -67,9 +72,9 @@ export async function startManagedElectronTarget(
         whisperModelPath: fastModel,
         whisperVADModelPath: null,
         whisperServerHost: "127.0.0.1",
-        whisperServerPort: target.port + 10_000,
+        whisperServerPort: fastServerPort,
         whisperRobustModelPath: robustModel,
-        robustWhisperServerPort: target.port + 10_001,
+        robustWhisperServerPort: robustServerPort,
         tempDirectory,
         salvageDirectory,
         daemonLogPath: path.join(logDirectory, "daemon.log"),
@@ -81,6 +86,8 @@ export async function startManagedElectronTarget(
         whisperThreads: 2,
         persistRecentCaptures: false,
         persistHistory: false,
+        localDiagnosticsEnabled: true,
+        recordingRecoveryEnabled: true,
         launchAtLogin: false,
         serverRequestTimeoutSeconds: 5,
         robustServerRequestTimeoutSeconds: 5,
@@ -119,7 +126,8 @@ export async function startManagedElectronTarget(
       WD_CONFIG: configPath,
       WD_HEADLESS: "1",
       WD_NODE_BINARY: process.execPath,
-      WD_E2E_TRANSCRIPT_NONCE: transcriptNonce,
+        WD_E2E_TRANSCRIPT_NONCE: transcriptNonce,
+        WD_INSTANCE_NONCE: instanceNonce,
     },
     stdio: ["ignore", logFd, logFd],
     windowsHide: true,
@@ -132,7 +140,7 @@ export async function startManagedElectronTarget(
   });
   let stopped = false;
   try {
-    await waitForListener(target, child, logPath);
+    await waitForListener(target, child, logPath, instanceNonce);
   } catch (error) {
     await stopChild(child);
     closeSync(logFd);
@@ -147,7 +155,10 @@ export async function startManagedElectronTarget(
         return;
       }
       stopped = true;
-      await sendControl(target, "shutdown").catch(() => undefined);
+      const status = await sendControl(target, "status").catch(() => null);
+      if (status?.status?.processInstanceId === instanceNonce) {
+        await sendControl(target, "shutdown").catch(() => undefined);
+      }
       await stopChild(child);
       closeSync(logFd);
       if (process.env.WD_E2E_KEEP_ARTIFACTS === "1") {
@@ -181,6 +192,7 @@ async function waitForListener(
   target: ControlTarget,
   child: ChildProcess,
   logPath: string,
+  instanceNonce: string,
 ): Promise<void> {
   const deadline = Date.now() + target.resultTimeoutMilliseconds;
   while (Date.now() < deadline) {
@@ -191,7 +203,7 @@ async function waitForListener(
     }
     try {
       const response = await sendControl(target, "status");
-      if (response.ok) {
+      if (response.ok && response.status?.processInstanceId === instanceNonce) {
         return;
       }
     } catch {
@@ -200,6 +212,22 @@ async function waitForListener(
     await sleep(100);
   }
   throw new Error(`Electron did not bind ${target.host}:${target.port}; log: ${logPath}`);
+}
+
+async function freeLoopbackPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      if (address === null || typeof address === "string") {
+        server.close();
+        reject(new Error("Unable to allocate an isolated test port."));
+        return;
+      }
+      server.close((error) => error ? reject(error) : resolve(address.port));
+    });
+  });
 }
 
 async function stopChild(child: ChildProcess): Promise<void> {

@@ -56,7 +56,7 @@ async function main(): Promise<void> {
       ownedSessionIds.add(sessionId);
       await sleep(target.captureMilliseconds);
 
-      const stopped = await sendControl(target, "stop");
+      const stopped = await sendControl(target, "stop", sessionId);
       if (!stopped.ok || stopped.sessionId !== sessionId) {
         throw new Error(`Cycle ${index + 1} failed to stop its own session: ${stopped.error ?? "id mismatch"}`);
       }

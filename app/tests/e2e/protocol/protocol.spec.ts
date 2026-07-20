@@ -54,6 +54,7 @@ describe.sequential(`control protocol against ${target.target}`, () => {
     const result = await waitForResult(target, sessionId);
     assertResultContract(result, sessionId);
     retryableResult = result;
+    expect((await sendControl(target, "ackResult", sessionId, "delivered")).ok).toBe(true);
 
     const duplicate = await sendControl(target, "nextResult", sessionId);
     expect(duplicate.ok).toBe(true);
@@ -67,7 +68,12 @@ describe.sequential(`control protocol against ${target.target}`, () => {
     ownedSessionIds.add(sessionId);
     await sleep(Math.min(target.captureMilliseconds, 300));
 
-    const cancelled = await sendControl(target, "cancel");
+    const mismatched = await sendControl(target, "cancel", randomUUID());
+    expect(mismatched.ok).toBe(false);
+    const stillRecording = await sendControl(target, "status");
+    expect(stillRecording.status?.activeSessionId).toBe(sessionId);
+
+    const cancelled = await sendControl(target, "cancel", sessionId);
     expect(cancelled.ok).toBe(true);
     await waitForPendingCount(target, 0);
 
@@ -85,7 +91,7 @@ describe.sequential(`control protocol against ${target.target}`, () => {
     const rejected = await sendControl(target, "retryRobust");
     expect(rejected.ok).toBe(false);
     expect(rejected.error).toBe("Stop the current recording before retranscribing it.");
-    expect((await sendControl(target, "cancel")).ok).toBe(true);
+    expect((await sendControl(target, "cancel", requireSessionId(started))).ok).toBe(true);
 
     const retried = await sendControl(target, "retryRobust");
     expect(retried.ok).toBe(true);
@@ -156,7 +162,7 @@ async function recordSession(waitForCompletion = true): Promise<string> {
   ownedSessionIds.add(sessionId);
   await sleep(target.captureMilliseconds);
 
-  const stopped = await sendControl(target, "stop");
+  const stopped = await sendControl(target, "stop", sessionId);
   expect(stopped.ok, stopped.error).toBe(true);
   expect(stopped.sessionId).toBe(sessionId);
   expect(stopped.pendingCount).toBeGreaterThanOrEqual(1);

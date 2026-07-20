@@ -29,6 +29,8 @@ export interface SessionResult {
 
 export interface StatusPayload {
   recording: boolean;
+  activeSessionId?: string;
+  processInstanceId?: string;
   recordingProfile?: string;
   pendingCount: number;
   engineReady: boolean;
@@ -89,8 +91,13 @@ export async function sendControl(
   target: ControlTarget,
   command: string,
   sessionId?: string,
+  deliveryOutcome?: "delivered" | "pasteFailed" | "noOutput",
 ): Promise<ControlResponse> {
-  const request = JSON.stringify({ command, ...(sessionId ? { sessionId } : {}) }) + "\n";
+  const request = JSON.stringify({
+    command,
+    ...(sessionId ? { sessionId } : {}),
+    ...(deliveryOutcome ? { deliveryOutcome } : {}),
+  }) + "\n";
 
   return new Promise((resolve, reject) => {
     const socket = net.createConnection({ host: target.host, port: target.port });
@@ -219,7 +226,11 @@ export async function drainOwnedSessions(
       throw new Error(statusResponse.error ?? "status failed during cleanup");
     }
     if (statusResponse.status.recording) {
-      const cancelled = await sendControl(target, "cancel");
+      const activeSessionId = statusResponse.status.activeSessionId;
+      if (!activeSessionId || !ids.includes(activeSessionId)) {
+        throw new Error("Refusing to cancel a recording not owned by this test.");
+      }
+      const cancelled = await sendControl(target, "cancel", activeSessionId);
       if (!cancelled.ok) {
         throw new Error(cancelled.error ?? "cancel failed during cleanup");
       }

@@ -178,6 +178,8 @@ function createDefaultConfig(
     whisperThreads: 4,
     persistRecentCaptures: false,
     persistHistory: true,
+    localDiagnosticsEnabled: true,
+    recordingRecoveryEnabled: true,
     serverRequestTimeoutSeconds: 30,
     robustServerRequestTimeoutSeconds: 120,
     cliTimeoutSeconds: 90,
